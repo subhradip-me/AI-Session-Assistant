@@ -1,0 +1,1 @@
+Always do the boiler plate code setup. That means code design, code structure. That means as a developer, you should write all the boiler plate code.
