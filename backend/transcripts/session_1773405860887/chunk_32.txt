@@ -1,0 +1,1 @@
+Basically, a framework built on top of React, which is optimized by rendering some things on the server. It gives you server capabilities, server components and you also give back-end functionalities. So next year's is basically an optimized version of React. That's the explanation.

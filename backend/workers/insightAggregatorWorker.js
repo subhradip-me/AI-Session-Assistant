@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import SegmentAnalysis from "../src/models/SegmentAnalysis.js";
+import BlockAnalysis from "../src/models/BlockAnalysis.js";
 import SessionContext from "../src/models/SessionContext.js";
 import EventService from "../src/services/EventService.js";
 import AIAnalysisService from "../src/services/AIAnalysisService.js";
@@ -24,30 +25,62 @@ function unique(arr) {
 
 async function aggregateSession(mediaId) {
 
-  const analyses = await SegmentAnalysis.find({ mediaId }).sort({ segmentId: 1 });
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Hierarchical Intelligence Aggregation
+  //
+  // PHASE 1: Try to aggregate from blocks (new path)
+  //   If blocks exist, use them as the primary source. This is 8x smaller
+  //   than segments, reducing noise and focusing on high-level patterns.
+  //
+  // PHASE 2: Fallback to segments (legacy path)
+  //   If no blocks (e.g., pipeline still running), aggregate segment analyses
+  //   directly. This maintains backward compatibility.
+  // ─────────────────────────────────────────────────────────────────────────────
 
-  if (!analyses.length) return null;
+  // Try to fetch block analyses first
+  let blocks = await BlockAnalysis.find({ mediaId }).sort({ blockId: 1 });
 
-  const intelligence = {
-
+  let intelligence = {
     topics: [],
     insights: [],
     questions: [],
     decisions: [],
     action_items: [],
     summaries: []
-
   };
 
-  for (const a of analyses) {
+  let dataSource = "blocks";
 
-    intelligence.topics.push(...(a.topics || []));
-    intelligence.insights.push(...(a.insights || []));
-    intelligence.questions.push(...(a.questions || []));
-    intelligence.decisions.push(...(a.decisions || []));
-    intelligence.action_items.push(...(a.action_items || []));
-    if (a.summary) intelligence.summaries.push(a.summary);
+  if (blocks.length > 0) {
+    console.log(`📊 Aggregating from ${blocks.length} blocks (hierarchical path)`);
 
+    // Aggregate from blocks
+    for (const block of blocks) {
+      intelligence.topics.push(...(block.topics || []));
+      intelligence.insights.push(...(block.insights || []));
+      intelligence.questions.push(...(block.questions || []));
+      intelligence.decisions.push(...(block.decisions || []));
+      intelligence.action_items.push(...(block.action_items || []));
+      if (block.summary) intelligence.summaries.push(block.summary);
+    }
+
+  } else {
+    console.log(`📊 No blocks found — falling back to segments (legacy path)`);
+    dataSource = "segments";
+
+    // Fallback: aggregate from segments
+    const analyses = await SegmentAnalysis.find({ mediaId }).sort({ segmentId: 1 });
+
+    if (!analyses.length) return null;
+
+    for (const a of analyses) {
+      intelligence.topics.push(...(a.topics || []));
+      intelligence.insights.push(...(a.insights || []));
+      intelligence.questions.push(...(a.questions || []));
+      intelligence.decisions.push(...(a.decisions || []));
+      intelligence.action_items.push(...(a.action_items || []));
+      if (a.summary) intelligence.summaries.push(a.summary);
+    }
   }
 
   // Cap summaries — for long sessions keep only the most evenly-spaced highlights
@@ -69,6 +102,12 @@ async function aggregateSession(mediaId) {
     console.log(`⚠️  No global context yet for ${mediaId} — running without it`);
   }
 
+  // Validate we have data before proceeding
+  if (!intelligence.topics.length && !intelligence.insights.length && !intelligence.questions.length && !intelligence.decisions.length && !intelligence.action_items.length) {
+    console.warn(`⚠️  No intelligence gathered for ${mediaId} from ${dataSource} (${blocks.length} blocks / ${dataSource === 'segments' ? 'fallback' : 'primary'})`);
+    return null;
+  }
+
   // Pass 1: exact-string deduplication
   intelligence.topics       = unique(intelligence.topics);
   intelligence.insights     = unique(intelligence.insights);
@@ -77,7 +116,7 @@ async function aggregateSession(mediaId) {
   intelligence.action_items = unique(intelligence.action_items);
 
   // Pass 2: AI-powered semantic deduplication — all categories in a single LLM call
-  console.log(`🧹 Running semantic deduplication (single-call)...`);
+  console.log(`🧹 Running semantic deduplication (single-call) from ${dataSource}...`);
   console.log(`   Before: topics=${intelligence.topics.length}, insights=${intelligence.insights.length}, questions=${intelligence.questions.length}, action_items=${intelligence.action_items.length}`);
 
   const deduped = await AIAnalysisService.deduplicateAll(intelligence);

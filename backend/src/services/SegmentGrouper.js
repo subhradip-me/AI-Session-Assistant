@@ -1,56 +1,41 @@
 class SegmentGrouper {
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Time-based grouping: Groups segments into 90-second windows (buckets).
+  // Each bucket represents a coherent time block for AI analysis.
+  // ─────────────────────────────────────────────────────────────────────────────
+
   groupSegments(segments) {
 
-    const groups = [];
+    const WINDOW = 90; // seconds per time bucket
+    const groups = {};
 
-    let current = null;
+    // Group segments by their start time into 90-second buckets
+    for (const seg of segments) {
+      const bucket = Math.floor(seg.start / WINDOW);
 
-    const PAUSE_THRESHOLD = 2;
-    const MAX_DURATION = 60; // seconds
-
-    for (let seg of segments) {
-
-      if (!current) {
-        current = {
+      if (!groups[bucket]) {
+        groups[bucket] = {
           start: seg.start,
           end: seg.end,
           text: seg.text
         };
-        continue;
-      }
-
-      const pause = seg.start - current.end;
-      const duration = current.end - current.start;
-
-      const shouldSplit =
-        pause > PAUSE_THRESHOLD ||
-        duration > MAX_DURATION;
-
-      if (shouldSplit) {
-
-        groups.push(current);
-
-        current = {
-          start: seg.start,
-          end: seg.end,
-          text: seg.text
-        };
-
       } else {
-
-        current.text += " " + seg.text;
-        current.end = seg.end;
-
+        groups[bucket].text += " " + seg.text;
+        groups[bucket].end = seg.end;
       }
-
     }
 
-    if (current) {
-      groups.push(current);
-    }
+    // Convert to array and assign segmentIds
+    const result = Object.values(groups).map((g, i) => ({
+      segmentId: i,
+      start: g.start,
+      end: g.end,
+      duration: g.end - g.start,
+      text: g.text
+    }));
 
-    return groups;
+    return result;
 
   }
 

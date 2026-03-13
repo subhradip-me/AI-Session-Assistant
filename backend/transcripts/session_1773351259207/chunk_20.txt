@@ -1,0 +1,1 @@
+There is a scaling document in which you can tell how to horizontally scale it. Open it and see if I can get it. We are using Cloud Instance. Life Kit Self Hosted Scaling. I remember it very well. I had to complete the self-hosted life kit and it has changed a lot. And then they told us how to do a horizontal scaling.

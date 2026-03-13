@@ -9,6 +9,7 @@ import SegmentAnalysis from "../src/models/SegmentAnalysis.js";
 import SessionContext from "../src/models/SessionContext.js";
 import EventService from "../src/services/EventService.js";
 import { insightAggregationQueue } from "../src/queues/insightAggregationQueue.js";
+import { blockQueue } from "../src/queues/blockQueue.js";
 import connectDB from "../src/config/db.js";
 
 // ─── Rate-limit helpers ───────────────────────────────────────────────────────
@@ -83,12 +84,33 @@ const worker = new Worker(
   async (job) => {
     const { mediaId, segmentId, text, totalSegments } = job.data;
 
+
+    // Idempotency check — if this segment was already analyzed, skip it. This can
+    // happen if a job was retried after a failure that occurred post-analysis but
+    // pre-persistence (e.g. during DB write or event emission). By checking at the start of the job, 
+    // we avoid unnecessary LLM calls and ensure that retries are safe and efficient. The analysis is keyed by mediaId + segmentId, 
+    // so if a doc exists for this pair, we know the work is already done.
+
+    const existing = await SegmentAnalysis.findOne({
+      mediaId,
+      segmentId
+    });
+
+    if (existing) {
+      console.log(`⏭️ Segment ${segmentId} already analyzed — skipping`);
+      return;
+    }
+
     // ── 1. Fetch rolling context just before LLM call ────────────────────────
     //   Query the last 2 completed segments so the LLM has continuity.
     //   Done here (not in analysisWorker) so context reflects actual DB state
     //   at processing time, not at dispatch time.
     const prevAnalyses = await SegmentAnalysis.find(
-      { mediaId, segmentId: { $lt: segmentId } }
+      {
+        mediaId,
+        segmentId: { $lt: segmentId },
+        summary: { $exists: true }
+      }
     )
       .sort({ segmentId: -1 })
       .limit(2);
@@ -104,7 +126,7 @@ const worker = new Worker(
     // the other one. If both are exhausted, throw an error that encodes
     // max(groqDelay, geminiDelay) — the BullMQ backoffStrategy reads it and
     // waits exactly that long before the next attempt.
-    const primary   = getProvider();
+    const primary = getProvider();
     const secondary = primary === "groq" ? "gemini" : "groq";
 
     console.log(`🔀 Segment ${segmentId}/${totalSegments - 1} → ${primary.toUpperCase()} (${mediaId})`);
@@ -139,8 +161,8 @@ const worker = new Worker(
         // then next attempt Groq is ready again.
         const d1 = parseRetryDelay(primaryErr);
         const d2 = parseRetryDelay(secondaryErr);
-        const minDelay  = Math.min(d1, d2);
-        const fastProv  = d1 <= d2 ? primary : secondary;
+        const minDelay = Math.min(d1, d2);
+        const fastProv = d1 <= d2 ? primary : secondary;
 
         const bothErr = new Error(
           `Both providers rate-limited — ` +
@@ -168,39 +190,74 @@ const worker = new Worker(
       analysis: result
     });
 
-    // ── 4. Aggregation trigger ───────────────────────────────────────────────
-    //   Check if this was the last segment. Use >= (not ===) as a safety net
-    //   in case a previous run left orphaned docs.
+    // ── 4. Block Aggregation trigger ────────────────────────────────────────
+    //   Hierarchical intelligence: group every 8 segments into a block.
+    //   This reduces LLM calls from N segments to N/8 blocks.
+    const SEGMENTS_PER_BLOCK = 8;
     const analysisCount = await SegmentAnalysis.countDocuments({ mediaId });
 
-    if (analysisCount >= totalSegments) {
-      console.log(`✅ All ${totalSegments} segments analyzed for ${mediaId} — waiting for global context...`);
+    // Every 8 segments, enqueue a block job
+    if ((segmentId + 1) % SEGMENTS_PER_BLOCK === 0) {
+      const blockId = Math.floor((analysisCount - 1) / SEGMENTS_PER_BLOCK);
+      const blockStartSegment = blockId * SEGMENTS_PER_BLOCK;
+      const blockSegmentIds = Array.from({ length: SEGMENTS_PER_BLOCK }, (_, i) => blockStartSegment + i);
+      const totalBlocks = Math.ceil(totalSegments / SEGMENTS_PER_BLOCK);
 
-      // Poll for SessionContext (up to 60 s) before triggering aggregation
-      let globalCtx = await SessionContext.findOne({ mediaId });
+      console.log(`🧱 Enqueuing block ${blockId}/${totalBlocks - 1} (segments ${blockStartSegment}-${blockStartSegment + SEGMENTS_PER_BLOCK - 1}) for ${mediaId}`);
+
+      await blockQueue.add(
+        "aggregate-block",
+        { mediaId, blockId, segmentIds: blockSegmentIds, totalBlocks },
+        {
+          jobId: `block-${mediaId}-${blockId}`,
+          removeOnComplete: true,
+          removeOnFail: 50
+        }
+      );
+    }
+
+    // ── 5. Final aggregation trigger ────────────────────────────────────────
+    //   Once ALL segments are analyzed, enqueue the final session intelligence job.
+    //   Use >= (not ===) as a safety net in case a previous run left orphaned docs.
+
+    if (analysisCount >= totalSegments) {
+      console.log(`✅ All ${totalSegments} segments analyzed for ${mediaId} — waiting for block processing...`);
+
+      // Poll for all blocks to be processed (up to 120s)
+      const totalBlocks = Math.ceil(totalSegments / SEGMENTS_PER_BLOCK);
+      let blockCount = 0;
       let attempts = 0;
 
-      while (!globalCtx && attempts < 30) {
-        console.log(`⏳ Global context not ready (${attempts + 1}/30), retrying in 2 s...`);
+      while (attempts < 60) {
+        const { default: BlockAnalysis } = await import("../src/models/BlockAnalysis.js");
+        blockCount = await BlockAnalysis.countDocuments({ mediaId });
+
+        if (blockCount >= totalBlocks) {
+          console.log(`✅ All ${totalBlocks} blocks processed for ${mediaId}`);
+          break;
+        }
+
+        console.log(`⏳ Blocks not ready (${blockCount}/${totalBlocks}), retrying in 2s...`);
         await new Promise(r => setTimeout(r, 2000));
-        globalCtx = await SessionContext.findOne({ mediaId });
         attempts++;
       }
 
-      if (!globalCtx) {
-        console.warn(`⚠️  Global context timed out for ${mediaId} — proceeding without it`);
-      } else {
-        console.log(`🌍 Global context ready — triggering aggregation`);
+      if (blockCount < totalBlocks) {
+        console.warn(`⚠️  Block processing timed out (${blockCount}/${totalBlocks}) — proceeding with available blocks`);
       }
 
-      await insightAggregationQueue.add(
+      // Attempt to enqueue final aggregation. The jobId ensures idempotency — if
+      // multiple workers try to add this job simultaneously, only one will
+      // actually be enqueued.
+      const agg = await insightAggregationQueue.add(
         "aggregate-insights",
-        { mediaId, totalSegments },
+        { mediaId, totalSegments, totalBlocks },
         {
           jobId: `aggregate-${mediaId}`,
           removeOnComplete: true
         }
       );
+      console.log(`📊 Aggregation job enqueued: ${agg.id}`);
     }
   },
   {

@@ -60,14 +60,21 @@ const worker = new Worker(
 
     // Enqueue only valid segments. totalSegments reflects the filtered count
     // so llmWorker knows exactly when all AI calls are done.
+    // Add jobId to prevent dispatcher re-runs from creating duplicate jobs.
     console.log(`Enqueueing ${validGroups.length} segments for AI analysis`);
     for (let i = 0; i < validGroups.length; i++) {
-      await analysisQueue.add("analyze-segment", {
-        mediaId,
-        segmentId: i,
-        text: validGroups[i].text,
-        totalSegments: validGroups.length
-      });
+      await analysisQueue.add(
+        "analyze-segment",
+        {
+          mediaId,
+          segmentId: i,
+          text: validGroups[i].text,
+          totalSegments: validGroups.length
+        },
+        {
+          jobId: `analysis-${mediaId}-${i}`
+        }
+      );
     }
 
   },
