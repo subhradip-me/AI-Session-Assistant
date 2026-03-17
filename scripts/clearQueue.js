@@ -1,4 +1,4 @@
-import { Queue } from "bullmq";
+import { Queue } from "../backend/node_modules/bullmq/dist/cjs/index.js";
 import redis from "../backend/src/config/redis.js";
 
 const queues = [

@@ -5,7 +5,9 @@ import { dirname, join } from "path";
 import path from "path";
 import WhisperService from "../src/services/WhisperService.js";
 import TranscriptService from "../src/services/TranscriptService.js";
+import TranscriptBufferService from "../src/services/TranscriptBufferService.js";
 import aggregationQueue from "../src/queues/aggregationQueue.js";
+import windowDiarizationQueue from "../src/queues/windowDiarizationQueue.js";
 import EventService from "../src/services/EventService.js";
 
 // Load environment variables (required for Kafka broker address)
@@ -39,6 +41,38 @@ const worker = new Worker(
     await TranscriptService.saveChunk(mediaId, chunkIndex, transcript);
 
     console.log(`Saved transcript for chunk ${chunkIndex}`);
+
+    // === EARLY WINDOW PROCESSING ===
+    // Add chunk to buffer and check if a window is ready
+    const window = TranscriptBufferService.addChunk(mediaId, chunkIndex, transcript);
+
+    if (window) {
+      console.log(`🪟 Window ready: ${window.windowId} (chunks ${window.chunkRange.start}-${window.chunkRange.end})`);
+
+      // Combine all chunk texts in the window
+      const combinedText = window.chunks.map(c => c.text).join(" ");
+
+      // Queue partial diarization for this window
+      await windowDiarizationQueue.add(
+        "diarize-window",
+        {
+          mediaId: window.mediaId,
+          windowId: window.windowId,
+          chunkRange: window.chunkRange,
+          combinedText
+        },
+        {
+          jobId: `diarize-${window.windowId}`
+        }
+      );
+
+      // Emit window-ready event for monitoring
+      await EventService.emit("WINDOW_DIARIZATION_QUEUED", {
+        mediaId: window.mediaId,
+        windowId: window.windowId,
+        chunkRange: window.chunkRange
+      });
+    }
 
     // Get total chunks from job data
     const totalChunks = job.data.totalChunks || (chunkIndex + 1);

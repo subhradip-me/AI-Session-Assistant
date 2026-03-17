@@ -13,70 +13,107 @@ console.log("📊 Segment Grouper Worker Started");
 const worker = new Worker(
   "segment-grouper",
   async (job) => {
+    try {
+      const { mediaId, segments, windowId } = job.data;
 
-    const { mediaId, segments } = job.data;
+      // Check if this is a window-based grouping
+      const isWindowJob = !!windowId;
 
-    console.log("Grouping segments:", mediaId);
+      if (isWindowJob) {
+        console.log(`🪟 [Window Grouper] Processing: ${windowId}`);
+      } else {
+        console.log(`📊 [Full Grouper] Processing full transcript: ${mediaId}`);
+      }
 
-    const groups = SegmentGrouper.groupSegments(segments);
+      const groups = SegmentGrouper.groupSegments(segments);
 
-    console.log(`Grouped into ${groups.length} segments`);
+      console.log(`  → Grouped into ${groups.length} segments`);
 
-    // ── Segment filter ────────────────────────────────────────────────────────
-    // Skip low-information groups before paying for an LLM call.
-    // Segments shorter than 120 chars are typically noise, filler phrases,
-    // or single-sentence transitions that produce zero useful intelligence.
-    const MIN_CHARS = 120;
-    const validGroups = groups.filter(g => g.text.trim().length >= MIN_CHARS);
+      // ── Segment filter ────────────────────────────────────────────────────────
+      // Skip low-information groups before paying for an LLM call.
+      // Segments shorter than 120 chars are typically noise, filler phrases,
+      // or single-sentence transitions that produce zero useful intelligence.
+      const MIN_CHARS = 120;
+      const validGroups = groups.filter(g => g.text.trim().length >= MIN_CHARS);
 
-    if (validGroups.length < groups.length) {
-      console.log(`🔍 Filtered ${groups.length - validGroups.length} low-information segment(s) (< ${MIN_CHARS} chars)`);
-    }
+      if (validGroups.length < groups.length) {
+        console.log(
+          `  🔍 Filtered ${groups.length - validGroups.length} low-info segments (< ${MIN_CHARS} chars)`
+        );
+      }
 
-    console.log(`📊 ${validGroups.length}/${groups.length} segments queued for AI analysis`);
+      console.log(`  ✓ ${validGroups.length}/${groups.length} segments queued for AI analysis`);
 
-    // Update MongoDB with ALL grouped segments for the transcript record
-    await Transcript.findOneAndUpdate(
-      { mediaId },
-      {
-        segments: groups,
-        status: 'grouped',
-        updatedAt: new Date()
-      },
-      { new: true }
-    );
+      if (!isWindowJob) {
+        // For full transcript: update MongoDB with ALL grouped segments
+        await Transcript.findOneAndUpdate(
+          { mediaId },
+          {
+            segments: groups,
+            status: 'grouped',
+            updatedAt: new Date()
+          },
+          { new: true }
+        );
 
-    console.log(`Saved grouped transcript to database for ${mediaId}`);
+        console.log(`  Saved grouped transcript to database for ${mediaId}`);
 
-    await EventService.emit("GROUPED_SEGMENTS_READY", {
-      mediaId,
-      groups
-    });
-
-    if (validGroups.length === 0) {
-      console.warn(`⚠️  All segments filtered for ${mediaId} — no AI analysis needed`);
-      return;
-    }
-
-    // Enqueue only valid segments. totalSegments reflects the filtered count
-    // so llmWorker knows exactly when all AI calls are done.
-    // Add jobId to prevent dispatcher re-runs from creating duplicate jobs.
-    console.log(`Enqueueing ${validGroups.length} segments for AI analysis`);
-    for (let i = 0; i < validGroups.length; i++) {
-      await analysisQueue.add(
-        "analyze-segment",
-        {
+        await EventService.emit("GROUPED_SEGMENTS_READY", {
           mediaId,
-          segmentId: i,
-          text: validGroups[i].text,
-          totalSegments: validGroups.length
-        },
-        {
-          jobId: `analysis-${mediaId}-${i}`
-        }
-      );
-    }
+          groups
+        });
+      } else {
+        // For window: emit window-specific event
+        await EventService.emit("WINDOW_GROUPED_READY", {
+          mediaId,
+          windowId,
+          groups
+        });
+      }
 
+      if (validGroups.length === 0) {
+        console.warn(`⚠️  All segments filtered — no AI analysis needed`);
+        return { groupCount: 0, validCount: 0 };
+      }
+
+      // Enqueue only valid segments for AI analysis
+      // For window-based: use window-based segmentIds (already strings from diarization)
+      console.log(`  → Enqueueing ${validGroups.length} segments for AI analysis`);
+
+      for (let i = 0; i < validGroups.length; i++) {
+        // Generate segment ID based on context
+        // Window: already has segmentId from earlier (e.g., "window-0-3-0")
+        // Full: needs numeric ID
+        const segmentId = validGroups[i].segmentId ?? i;
+
+        await analysisQueue.add(
+          "analyze-segment",
+          {
+            mediaId,
+            windowId, // pass through if present
+            segmentId,
+            text: validGroups[i].text,
+            totalSegments: validGroups.length
+          },
+          {
+            jobId: isWindowJob
+              ? `analysis-${segmentId}`
+              : `analysis-${mediaId}-${i}`
+          }
+        );
+      }
+
+      return {
+        mediaId,
+        windowId,
+        groupCount: groups.length,
+        validCount: validGroups.length
+      };
+
+    } catch (err) {
+      console.error("❌ Error in segment grouper:", err);
+      throw err;
+    }
   },
   {
     connection: {
@@ -87,9 +124,9 @@ const worker = new Worker(
 );
 
 worker.on("completed", (job) => {
-  console.log(`Grouper job ${job.id} completed`);
+  console.log(`✅ Grouper job ${job.id} completed`);
 });
 
 worker.on("failed", (job, err) => {
-  console.error(`Grouper job ${job?.id} failed`, err.message);
+  console.error(`❌ Grouper job ${job?.id} failed:`, err.message);
 });

@@ -5,6 +5,7 @@ import { dirname, join } from "path";
 import SegmentAnalysis from "../src/models/SegmentAnalysis.js";
 import BlockAnalysis from "../src/models/BlockAnalysis.js";
 import SessionContext from "../src/models/SessionContext.js";
+import TranscriptBufferService from "../src/services/TranscriptBufferService.js";
 import EventService from "../src/services/EventService.js";
 import AIAnalysisService from "../src/services/AIAnalysisService.js";
 import connectDB from "../src/config/db.js";
@@ -159,6 +160,10 @@ const worker = new Worker(
     });
 
     console.log(`✅ SESSION_INTELLIGENCE_READY emitted for ${mediaId}`);
+
+    // === CLEANUP BUFFER ===
+    // Memory cleanup: release the sliding window buffer for this session
+    TranscriptBufferService.cleanup(mediaId);
 
   },
   {

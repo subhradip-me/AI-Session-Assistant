@@ -8,7 +8,7 @@ const SegmentAnalysisSchema = new mongoose.Schema({
   },
 
   segmentId: {
-    type: Number,
+    type: mongoose.Schema.Types.Mixed, // supports both Number (legacy) and String (window-based)
     required: true
   },
 
