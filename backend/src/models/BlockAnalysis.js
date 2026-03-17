@@ -40,9 +40,7 @@ const BlockAnalysisSchema = new mongoose.Schema({
 
 }, { timestamps: true });
 
-// Compound index for efficient querying
+// Compound unique index: efficient querying + dedup guard
 BlockAnalysisSchema.index({ mediaId: 1, blockId: 1 }, { unique: true });
-// Index for finding all blocks for a media session, sorted by time
-BlockAnalysisSchema.index({ mediaId: 1, blockId: 1 });
 
 export default mongoose.model("BlockAnalysis", BlockAnalysisSchema);

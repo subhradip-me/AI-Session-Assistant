@@ -7,6 +7,7 @@ import KafkaService from "./src/services/KafkaService.js";
 
 // Import routes
 import uploadRoutes from "./src/routes/uploadRoutes.js";
+import chatRoutes from "./src/routes/chatRoutes.js";
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -53,6 +54,9 @@ app.get("/test-kafka", async (req, res) => {
 
 // Use the upload routes for handling file uploads
 app.use("/api", uploadRoutes);
+
+// Use the chat and report routes
+app.use("/api", chatRoutes);
 
 const PORT = process.env.PORT || 5000; // Use environment variable for port or default to 5000
 

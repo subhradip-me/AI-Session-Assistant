@@ -8,6 +8,8 @@ import SessionContext from "../src/models/SessionContext.js";
 import TranscriptBufferService from "../src/services/TranscriptBufferService.js";
 import EventService from "../src/services/EventService.js";
 import AIAnalysisService from "../src/services/AIAnalysisService.js";
+import reportQueue from "../src/queues/reportQueue.js";
+//import SessionReport from "../src/models/SessionReport.js";
 import connectDB from "../src/config/db.js";
 
 // Load environment variables
@@ -164,6 +166,20 @@ const worker = new Worker(
     // === CLEANUP BUFFER ===
     // Memory cleanup: release the sliding window buffer for this session
     TranscriptBufferService.cleanup(mediaId);
+
+    // === CREATE SESSION REPORT ===
+      
+    await reportQueue.add("create-session-report", {
+      mediaId,
+      intelligence
+    },
+  {
+    jobId: `create-session-report-${mediaId}`,
+    removeOnComplete: true,
+    removeOnFail: true
+  });
+
+    console.log(`✅ Session report job added for ${mediaId}`);
 
   },
   {
