@@ -170,7 +170,12 @@ const worker = new Worker(
     connection: {
       host: "127.0.0.1",
       port: 6379
-    }
+    },
+    // Prevent completed/failed jobs from accumulating in Redis indefinitely.
+    // Without this, old jobs can re-trigger on worker restart and cause
+    // SESSION_INTELLIGENCE_READY to be emitted multiple times for old sessions.
+    removeOnComplete: { count: 10 },
+    removeOnFail:     { count: 20 }
   }
 );
 

@@ -33,8 +33,10 @@ const worker = new Worker(
             {
                 // Deduplicate: if the same segment is re-dispatched (e.g. on retry),
                 // BullMQ will reuse the existing queued job rather than add a duplicate.
+                // jobId must match the convention used by llmWorker and blockQueue checks.
                 jobId: `llm-${mediaId}-${segmentId}`,
-                jobId: `analysis-${mediaId}-${segmentId}`
+                removeOnComplete: true,
+                removeOnFail: { count: 50 }
             }
         );
 

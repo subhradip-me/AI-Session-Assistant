@@ -129,13 +129,17 @@ const worker = new Worker(
     if (completedBlocks >= totalBlocks) {
       console.log(`✅ All ${totalBlocks} blocks analyzed for ${mediaId} — triggering final aggregation`);
 
-      // Idempotent aggregation job
+      // Idempotent aggregation job.
+      // IMPORTANT: jobId must match llmWorker.js exactly — both code paths
+      // can trigger the final aggregation and BullMQ deduplication prevents
+      // double-processing only when the jobId is identical in both callers.
       const agg = await insightAggregationQueue.add(
         "aggregate-insights",
         { mediaId, totalBlocks },
         {
-          jobId: `block-aggregate-${mediaId}`,
-          removeOnComplete: true
+          jobId: `final-aggregate-${mediaId}`,
+          removeOnComplete: true,
+          removeOnFail: { count: 20 }
         }
       );
       console.log(`📊 Block aggregation job enqueued: ${agg.id}`);

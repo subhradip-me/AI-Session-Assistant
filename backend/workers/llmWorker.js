@@ -105,21 +105,35 @@ const worker = new Worker(
     //   Query the last 2 completed segments so the LLM has continuity.
     //   Done here (not in analysisWorker) so context reflects actual DB state
     //   at processing time, not at dispatch time.
-    const prevAnalyses = await SegmentAnalysis.find(
-      {
-        mediaId,
-        segmentId: { $lt: segmentId },
-        summary: { $exists: true }
-      }
-    )
-      .sort({ segmentId: -1 })
-      .limit(2);
+    //
+    //   IMPORTANT: Only fetch rolling context for numeric (Path B) segmentIds.
+    //   Window-based string IDs like "session_123-window-0-3-2" don't have a
+    //   meaningful numeric ordering and MongoDB's $lt on mixed types uses
+    //   lexicographic comparison — which returns wrong/irrelevant segments.
+    const isNumericSegmentId = typeof segmentId === 'number';
 
-    const previousContext = prevAnalyses
-      .reverse()
-      .map(a => a.summary)
-      .filter(Boolean)
-      .join("\n");
+    let previousContext = "";
+
+    if (isNumericSegmentId) {
+      const prevAnalyses = await SegmentAnalysis.find(
+        {
+          mediaId,
+          segmentId: { $lt: segmentId },
+          summary: { $exists: true }
+        }
+      )
+        .sort({ segmentId: -1 })
+        .limit(2);
+
+      previousContext = prevAnalyses
+        .reverse()
+        .map(a => a.summary)
+        .filter(Boolean)
+        .join("\n");
+    } else {
+      // Window-based IDs: no rolling context (each window is self-contained)
+      console.log(`   ℹ️  Skipping rolling context for window-based segmentId: ${segmentId}`);
+    }
 
     // ── 2. Provider routing with automatic fallback ───────────────────────────
     // Try the chosen provider first. If it is rate-limited, immediately try
@@ -247,14 +261,16 @@ const worker = new Worker(
       }
 
       // Attempt to enqueue final aggregation. The jobId ensures idempotency — if
-      // multiple workers try to add this job simultaneously, only one will
-      // actually be enqueued.
+      // multiple workers try to add this job simultaneously (e.g. both llmWorker
+      // and blockAggregatorWorker fire at the same time), only one will be
+      // enqueued. IMPORTANT: this jobId must match blockAggregatorWorker exactly.
       const agg = await insightAggregationQueue.add(
         "aggregate-insights",
         { mediaId, totalSegments, totalBlocks },
         {
-          jobId: `aggregate-${mediaId}`,
-          removeOnComplete: true
+          jobId: `final-aggregate-${mediaId}`,
+          removeOnComplete: true,
+          removeOnFail: { count: 20 }
         }
       );
       console.log(`📊 Aggregation job enqueued: ${agg.id}`);
