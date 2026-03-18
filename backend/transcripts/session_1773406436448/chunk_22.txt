@@ -1,1 +1,0 @@
-Let me find it where it was. Now it is completely changed. I am pretty sure that we used reddests to scale horizontally. You can use sticky sessions on region routing. You can have a server but you have to do a sticky session. You have to write a hash function that if a server is assigned to you, you have to redirect all the participants to the server.

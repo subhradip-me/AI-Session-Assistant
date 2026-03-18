@@ -85,7 +85,7 @@ const worker = new Worker(
     });
 
     // Check if all chunks are complete
-    const done = TranscriptService.isComplete(mediaId, totalChunks);
+    const done = await TranscriptService.isComplete(mediaId, totalChunks);
 
     console.log(`Completion check: ${done} (${chunkIndex + 1}/${totalChunks} chunks)`);
 

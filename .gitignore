@@ -1,6 +1,7 @@
 node_modules
 .env
-uploads
-dist
-logs
+uploads/
+transcripts/
+dist/
+logs/
 *.log

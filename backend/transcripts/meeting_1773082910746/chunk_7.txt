@@ -1,1 +1,0 @@
-I knew that students have to be comfortable with our postgres.

@@ -1,1 +1,0 @@
-understand how internally graphs work because AI is very used in the world. So these algorithms and data structures help me to understand and visualize how graph traversal works. Graph DB, how does it work?

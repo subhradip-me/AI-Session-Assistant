@@ -205,19 +205,21 @@ const worker = new Worker(
     });
 
     // ── 4. Block Aggregation trigger ────────────────────────────────────────
-    //   Hierarchical intelligence: group every 8 segments into a block.
-    //   This reduces LLM calls from N segments to N/8 blocks.
+    //   Only runs for Path B (numeric segmentIds). Window-based (string) IDs
+    //   are handled by a separate diarization path and don't form blocks.
+    //
+    //   blockId is derived DIRECTLY from segmentId — not from analysisCount.
+    //   Using analysisCount was broken: Path A string docs inflate the count,
+    //   causing wrong blockId values and missed or duplicate block jobs.
     const SEGMENTS_PER_BLOCK = 8;
-    const analysisCount = await SegmentAnalysis.countDocuments({ mediaId });
 
-    // Every 8 segments, enqueue a block job
-    if ((segmentId + 1) % SEGMENTS_PER_BLOCK === 0) {
-      const blockId = Math.floor((analysisCount - 1) / SEGMENTS_PER_BLOCK);
-      const blockStartSegment = blockId * SEGMENTS_PER_BLOCK;
-      const blockSegmentIds = Array.from({ length: SEGMENTS_PER_BLOCK }, (_, i) => blockStartSegment + i);
-      const totalBlocks = Math.ceil(totalSegments / SEGMENTS_PER_BLOCK);
+    if (isNumericSegmentId && (segmentId + 1) % SEGMENTS_PER_BLOCK === 0) {
+      const blockId         = Math.floor(segmentId / SEGMENTS_PER_BLOCK);
+      const blockStartSeg   = blockId * SEGMENTS_PER_BLOCK;
+      const blockSegmentIds = Array.from({ length: SEGMENTS_PER_BLOCK }, (_, i) => blockStartSeg + i);
+      const totalBlocks     = Math.ceil(totalSegments / SEGMENTS_PER_BLOCK);
 
-      console.log(`🧱 Enqueuing block ${blockId}/${totalBlocks - 1} (segments ${blockStartSegment}-${blockStartSegment + SEGMENTS_PER_BLOCK - 1}) for ${mediaId}`);
+      console.log(`🧱 Enqueuing block ${blockId}/${totalBlocks - 1} (segments ${blockStartSeg}–${blockStartSeg + SEGMENTS_PER_BLOCK - 1}) for ${mediaId}`);
 
       await blockQueue.add(
         "aggregate-block",
@@ -230,11 +232,18 @@ const worker = new Worker(
       );
     }
 
+
     // ── 5. Final aggregation trigger ────────────────────────────────────────
     //   Once ALL segments are analyzed, enqueue the final session intelligence job.
     //   Use >= (not ===) as a safety net in case a previous run left orphaned docs.
+    //   Count only numeric segmentIds (Path B) — string window IDs must not
+    //   falsely inflate the count and cause premature final aggregation.
+    const analysisCount = await SegmentAnalysis.countDocuments({
+      mediaId,
+      segmentId: { $type: "number" }
+    });
 
-    if (analysisCount >= totalSegments) {
+    if (isNumericSegmentId && analysisCount >= totalSegments) {
       console.log(`✅ All ${totalSegments} segments analyzed for ${mediaId} — waiting for block processing...`);
 
       // Poll for all blocks to be processed (up to 120s)

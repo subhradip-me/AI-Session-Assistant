@@ -1,1 +1,0 @@
-So, I went with drizzle. And I have made some exercises or thought processes for you to just write drizzle. You are not writing SQL, you are not worried about Postgres.

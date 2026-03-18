@@ -8,6 +8,7 @@ import BlockAnalysis from "../src/models/BlockAnalysis.js";
 import AIAnalysisService from "../src/services/AIAnalysisService.js";
 import EventService from "../src/services/EventService.js";
 import { insightAggregationQueue } from "../src/queues/insightAggregationQueue.js";
+import { embeddingQueue } from "../src/queues/embeddingQueue.js";
 import connectDB from "../src/config/db.js";
 
 // Load environment variables
@@ -144,6 +145,16 @@ const worker = new Worker(
       );
       console.log(`📊 Block aggregation job enqueued: ${agg.id}`);
     }
+
+    // ── 9. Enqueue embedding for this block ───────────────────────────────
+    await embeddingQueue.add(
+      "embed-block",
+      { mediaId, blockId },
+      {
+        jobId: `embed-${mediaId}-${blockId}`,
+        removeOnComplete: true
+      }
+    );
   },
   {
     connection: redis,

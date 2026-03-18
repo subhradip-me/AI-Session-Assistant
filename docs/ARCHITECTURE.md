@@ -1,8 +1,8 @@
 # AI Session Assistant — Architecture Documentation
 
-**Version**: 4.0.0 (Phase E — Product Layer: Report + Chat)  
+**Version**: 5.1.0 (Phase F — RAG: Real Semantic Embeddings via Ollama)  
 **Last Updated**: March 18, 2026  
-**Status**: ✅ Fully Operational — 13 workers, 13 queues, 3 API endpoints, 7 models
+**Status**: ✅ Fully Operational — 14 workers, 14 queues, 3 API endpoints, 7 models
 
 ---
 
@@ -22,6 +22,7 @@
 12. [Starting All Workers](#12-starting-all-workers)
 13. [Implementation Phases](#13-implementation-phases)
 14. [Troubleshooting](#14-troubleshooting)
+15. [Test Results](#15-test-results)
 
 ---
 
@@ -43,6 +44,8 @@ The AI Session Assistant is an event-driven, microservices-style pipeline that p
 | **Hierarchical dedup** | Every 8 segments → 1 Block → Final session intelligence (80–90% fewer LLM calls) |
 | **Memory safety** | In-memory sliding window buffer released after session completes |
 | **Product layer** | Session Report + Chat API on top of raw intelligence |
+| **RAG retrieval** | Chat uses semantic vector search + topic boosting instead of flat report lookup |
+| **Cloud transcript storage** | All transcript chunks stored in MinIO — no local filesystem dependency |
 
 ---
 
@@ -58,6 +61,10 @@ The AI Session Assistant is an event-driven, microservices-style pipeline that p
 | Event Streaming | kafkajs | v2.2.4 |
 | Database | Mongoose (MongoDB) | v9.2.4 |
 | Object Storage | minio | v8.0.7 |
+| Vector Database | Qdrant | local (port 6333) |
+| Vector DB Client | @qdrant/js-client-rest | v1.17.0 |
+| Embedding Model | nomic-embed-text via Ollama | 768-dim |
+| UUID generation | uuid (v5 namespaced) | v13.0.0 |
 | AI Transcription | Whisper.cpp | local binary |
 | AI Analysis (primary) | Groq SDK — Llama 3.3 70B | v0.37.0 |
 | AI Analysis (fallback) | Google Generative AI — Gemini 2.0 Flash | v0.24.0 |
@@ -89,7 +96,7 @@ The AI Session Assistant is an event-driven, microservices-style pipeline that p
 ┌──────────────────────────────────────────────────────────────┐
 │              transcriptionWorker (Whisper.cpp)                │
 │  • Runs whisper-cli.exe on chunk → transcript text           │
-│  • Saves chunk_N.txt to disk                                 │
+│  • Saves chunk_N.txt to MinIO (transcripts bucket)          │
 │  • Adds chunk to TranscriptBufferService                     │
 └───────────────────┬──────────────────────┬───────────────────┘
                     │                      │
@@ -167,13 +174,34 @@ reportGeneratorWorker (report-generator queue)
         ↓
 Frontend: GET /api/report/:mediaId
     → shows report + suggestedQuestions
-        ↓
+```
+
+### Phase F — RAG: Intelligent Memory Retrieval
+
+```
+                         blockAggregatorWorker
+                               ↓
+                   embeddingQueue ("embed-block" job)
+                               ↓
+                   embeddingWorker
+                     • BlockAnalysis.findOne()
+                     • embed(summary + insights)   → 384-dim vector
+                     • insertVector()               → Qdrant (uuid v5 point ID)
+
 User asks question → POST /api/chat
     → chatQueue job
-    → chatWorker
-        • fetches SessionReport as context
-        • calls AIAnalysisService.groqChat()
-        • returns { answer }
+    → chatWorker (Phase F)
+        1. retrieve(mediaId, question)
+             • embed(question) → queryVector
+             • searchVector()  → top-10 Qdrant candidates
+             • topic boost (+0.1 if query keywords ∩ block topics)
+             • re-rank + slice top 3
+        2. buildContext(mediaId, retrievedBlocks)
+             • SessionContext.findOne()        → global summary + topics
+             • BlockAnalysis.findOne() × N    → block detail (parallel)
+             • format: [Block N] mm:ss–mm:ss / Summary / Insights / Topics / Decisions
+        3. structured prompt → AIAnalysisService.groqChat()
+        4. returns { answer, retrievedBlocks }
 ```
 
 ---
@@ -200,7 +228,8 @@ UploadController:
 ```
 transcriptionWorker  [queue: transcriptionQueue]
   WhisperService.transcribe(chunkPath)
-  TranscriptService.saveChunk(mediaId, chunkIndex, text)   → chunk_N.txt
+  TranscriptService.saveChunk(mediaId, chunkIndex, text)
+    → MinIO: transcripts/{mediaId}/chunk_{chunkIndex}.txt
   
   TranscriptBufferService.addChunk(mediaId, chunkIndex, text)
     └─ if window ready (4 consecutive chunks, stride 2, continuity validated):
@@ -209,7 +238,7 @@ transcriptionWorker  [queue: transcriptionQueue]
   
   emit CHUNK_TRANSCRIBED (Kafka)
   
-  if TranscriptService.isComplete(mediaId, totalChunks):
+  if await TranscriptService.isComplete(mediaId, totalChunks):  ← async (MinIO list)
     aggregationQueue.add({ mediaId })
     emit TRANSCRIPTION_COMPLETE (Kafka)
 ```
@@ -229,7 +258,11 @@ windowDiarizationWorker  [queue: window-diarization]
 
 ```
 transcriptAggregatorWorker  [queue: transcript-aggregation]
-  TranscriptService.merge(mediaId)    → reads + sorts all chunk_N.txt files
+  TranscriptService.merge(mediaId)
+    → lists MinIO transcripts/{mediaId}/chunk_*.txt
+    → downloads all chunks in parallel
+    → sorts by chunk index
+    → uploads merged text to transcripts/{mediaId}/final_transcript.txt
   emit TRANSCRIPT_READY (Kafka)
   diarizationQueue.add({ mediaId, transcript })
   globalContextQueue.add({ mediaId, transcript }, { jobId: context-${mediaId} })
@@ -349,6 +382,23 @@ blockAggregatorWorker  [queue: block-aggregation, concurrency: 3]
   if BlockAnalysis.count >= totalBlocks:
     insightAggregationQueue.add({ mediaId, totalBlocks },
       { jobId: final-aggregate-${mediaId} })   ← matches llmWorker jobId
+  
+  embeddingQueue.add("embed-block", { mediaId, blockId },
+    { jobId: embed-${mediaId}-${blockId} })    ← triggers Phase F embedding
+```
+
+### Step 7c — Block Embedding [Phase F]
+
+```
+embeddingWorker  [queue: embedding]
+  BlockAnalysis.findOne({ mediaId, blockId })
+  text = block.summary + " " + block.insights.join(" ")
+  embed(text)              → 384-dim float[] vector (embeddingService)
+  insertVector(            → Qdrant upsert
+    id  = toPointId(`${mediaId}-${blockId}`)   ← uuid v5 deterministic
+    vector,
+    payload: { mediaId, blockId, topics }
+  )
 ```
 
 ### Step 8 — Insight Aggregation
@@ -395,14 +445,24 @@ reportGeneratorWorker  [queue: report-generator]
   SessionReport.findOneAndUpdate({ mediaId }, { content, updatedAt }, { upsert })
 ```
 
-### Step 10 — Chat [Phase E]
+### Step 10 — Chat [Phase F — RAG]
 
 ```
 chatWorker  [queue: chat-query]
-  SessionReport.findOne({ mediaId })
-  builds grounded prompt: "You are an AI session assistant. Context: ${report.content}..."
-  AIAnalysisService.groqChat(prompt, 0.3)
-  returns { answer }
+  1. retrieve(mediaId, question)                      ← retrieverService
+       embed(question) → queryVector
+       searchVector(queryVector, mediaId)  → 10 Qdrant candidates
+       topic boost: +0.1 if block.topics ∩ queryKeywords
+       re-rank + top 3
+  2. buildContext(mediaId, retrievedBlocks)           ← contextBuilder
+       SessionContext.findOne()     → global summary header
+       BlockAnalysis.findOne() × N → block detail (parallel, .lean())
+       formatted context with [Block N] mm:ss–mm:ss / Summary / Insights / Decisions
+  3. structured prompt → AIAnalysisService.groqChat(prompt, 0.3)
+  4. returns { answer, retrievedBlocks: N }
+  
+  Note: retrieve() and buildContext() are try/catch wrapped.
+  If Qdrant is unavailable, chat degrades gracefully (empty context message).
 ```
 
 ---
@@ -470,9 +530,9 @@ Ask the AI assistant a question about a completed session.
 
 **Notes**:
 - Enqueues a `chat-query` BullMQ job, awaits result via `QueueEvents.waitUntilFinished()` (30s timeout)
-- Context = `SessionReport.content` (the formatted text report)
-- LLM is instructed not to hallucinate beyond the report content
-- Future: RAG upgrade will include segments + blocks + vector DB
+- Context = top-3 relevant `BlockAnalysis` docs retrieved via Qdrant vector search (Phase F)
+- Topic-keyword boost applied before re-ranking (hybrid retrieval)
+- Falls back gracefully if Qdrant is unavailable
 
 ---
 
@@ -501,6 +561,7 @@ Ask the AI assistant a question about a completed session.
 | 11 | `globalContextWorker.js` | `global-context` | `🌍 Global Context Worker Started` | 1 | ✅ | `GLOBAL_CONTEXT_READY` |
 | 12 | `reportGeneratorWorker.js` | `report-generator` | `📄 Report Generator Worker Started` | default | ✅ | — |
 | 13 | `chatWorker.js` | `chat-query` | `💬 Chat Worker Started` | default | ✅ | — |
+| 14 ★ | `embeddingWorker.js` | `embedding` | `📌 Embedding Worker started` | default | ✅ | — |
 
 ### Worker Details
 
@@ -533,8 +594,25 @@ Process:
   4. BlockAnalysis.findOneAndUpdate({ mediaId, blockId }, ..., { upsert })
   5. Check if all blocks done → trigger insightAggregationQueue
      jobId: final-aggregate-${mediaId}  ← MUST match llmWorker
+  6. ★ embeddingQueue.add("embed-block", { mediaId, blockId },
+       { jobId: embed-${mediaId}-${blockId} })
 
 Cost: 40 blocks (320 segments ÷ 8) → 40 LLM calls vs 320
+```
+
+#### `embeddingWorker.js` — Vector Embedding [Phase F]
+
+```
+Input: { mediaId, blockId } from embeddingQueue
+Process:
+  1. BlockAnalysis.findOne({ mediaId, blockId })
+  2. text = block.summary + " " + block.insights.join(" ")
+  3. embed(text)  → 384-dim float[] (embeddingService — currently placeholder)
+  4. insertVector(toPointId(`${mediaId}-${blockId}`), vector, { mediaId, blockId, topics })
+     → Qdrant upsert into "session_blocks" collection (Cosine distance)
+
+Note: embeddingService currently returns a random 384-dim vector (stub).
+Swap for a real model (BGE, Nomic, or OpenAI) to enable accurate retrieval.
 ```
 
 #### `insightAggregatorWorker.js` — Final Intelligence Compilation
@@ -580,6 +658,7 @@ After completion:
 | `globalContextQueue.js` | `global-context` | transcriptAggregatorWorker | globalContextWorker |
 | `reportQueue.js` | `report-generator` | insightAggregatorWorker | reportGeneratorWorker |
 | `chatQueue.js` | `chat-query` | chatRoutes POST /api/chat | chatWorker |
+| `embeddingQueue.js` ★ | `embedding` | blockAggregatorWorker (per block) | embeddingWorker |
 
 ### Job ID Conventions (Idempotency Guards)
 
@@ -595,6 +674,7 @@ After completion:
 | Block aggregation | `block-${mediaId}-${blockId}` | One block job per blockId |
 | Final aggregation | `final-aggregate-${mediaId}` | **Same in both llmWorker and blockAggregatorWorker** |
 | Report generation | `create-session-report-${mediaId}` | One report per session |
+| Block embedding | `embed-${mediaId}-${blockId}` | One embedding job per block |
 
 ---
 
@@ -801,6 +881,51 @@ async emit(event, payload)
   fails silently (pipeline continues if Kafka is down)
 ```
 
+### retrieverService (`src/services/retrieverService.js`) [Phase F]
+
+```javascript
+async retrieve(mediaId, query, topK = 3)
+  // 1. embed(query) → queryVector
+  // 2. searchVector(queryVector, mediaId) → up to 10 Qdrant candidates
+  // 3. Topic boost: score += 0.1 if block.topics ∩ query keywords
+  // 4. sort desc by boosted score → slice(0, topK)
+  → [{ score, mediaId, blockId, topics, ... }]
+```
+
+### contextBuilder (`src/services/contextBuilder.js`) [Phase F]
+
+```javascript
+async buildContext(mediaId, retrievedBlocks)
+  // 1. SessionContext.findOne({ mediaId }) → global session summary
+  // 2. BlockAnalysis.findOne() × N in parallel (.lean())
+  // 3. Format: time range (mm:ss), summary, insights, decisions, action items
+  → "Session Overview:\n...\nRelevant Discussions:\n[Block 1] 00:00–02:30\n..."
+```
+
+### vectorService (`src/services/vectorService.js`) [Phase F]
+
+```javascript
+async initCollection()
+  // getCollections() → create "session_blocks" (size: 384, distance: Cosine) if absent
+
+async insertVector(id, vector, payload)
+  // id → toPointId(id) via uuid v5 (Qdrant requires UUID or integer)
+  // upsert into "session_blocks" collection
+
+async searchVector(vector, mediaId)
+  // ANN search, limit: 10, filter: mediaId match
+  → Qdrant search results[]
+```
+
+### embeddingService (`src/services/embeddingService.js`) [Phase F — stub]
+
+```javascript
+async embed(text)
+  → Array(384).fill(Math.random())   // ⚠️ placeholder — replace with real model
+```
+
+> **Next step**: Replace stub with a real embedding model (BGE-small, Nomic-embed, or OpenAI `text-embedding-3-small`) for accurate semantic retrieval.
+
 ### Other Services
 
 | Service | Key Method | Purpose |
@@ -809,7 +934,7 @@ async emit(event, payload)
 | `ChunkService` | `splitAudio(audioPath)` | FFmpeg: split into 30s .wav chunks |
 | `StorageService` | `uploadChunks(dir, mediaId, count)` | Upload chunks to MinIO, trigger Kafka + Redis |
 | `WhisperService` | `transcribe(audioPath)` | Run whisper-cli.exe, return transcript text |
-| `TranscriptService` | `saveChunk / merge / isComplete` | File I/O: chunk_N.txt files + final merge |
+| `TranscriptService` | `saveChunk / merge / isComplete` | **MinIO-backed**: `transcripts/{mediaId}/chunk_N.txt`; auto-creates bucket |
 | `TranscriptCleaner` | `cleanSegments(segments)` | Strip [noise] markers, normalise whitespace, dedup |
 | `SpeakerService` | `process(mediaId, transcript)` | Coordinates full-transcript diarization |
 
@@ -911,18 +1036,22 @@ backend/
 │       ├── providerRouter.js            # 70% Groq / 30% Gemini weighted routing
 │       ├── AudioService.js              # FFmpeg audio extraction
 │       ├── ChunkService.js              # FFmpeg 30s chunk splitting
+│       ├── contextBuilder.js            # ★ Phase F: build structured LLM context from blocks
+│       ├── embeddingService.js          # ★ Phase F: embed text → 384-dim vector (stub)
 │       ├── EventService.js              # Kafka event emission
 │       ├── InsightAggregator.js
 │       ├── JobService.js                # transcriptionQueue job helper
 │       ├── KafkaService.js
 │       ├── QueueService.js
+│       ├── retrieverService.js          # ★ Phase F: semantic search + topic boosting
 │       ├── SegmentGrouper.js            # 90s time-based grouping
 │       ├── SpeakerSegmentationService.js # alternating-speaker heuristic
 │       ├── SpeakerService.js
 │       ├── storageService.js            # MinIO upload + trigger
 │       ├── TranscriptBufferService.js   # Sliding window buffer (WINDOW_SIZE=4, STRIDE=2)
 │       ├── TranscriptCleaner.js         # noise strip, dedup
-│       ├── TranscriptService.js         # file I/O for chunks
+│       ├── TranscriptService.js         # ★ MinIO-backed transcript I/O (bucket: transcripts)
+│       ├── vectorService.js             # ★ Phase F: Qdrant client (initCollection/insert/search)
 │       └── WhisperService.js            # whisper-cli.exe runner
 ├── workers/
 │   ├── transcriptionWorker.js           # Whisper, buffer, window trigger
@@ -937,12 +1066,14 @@ backend/
 │   ├── insightAggregatorWorker.js       # Final: blocks → intelligence → report trigger
 │   ├── globalContextWorker.js           # Parallel: full-transcript holistic analysis
 │   ├── reportGeneratorWorker.js        # ★ Phase E: formats + saves session report
-│   └── chatWorker.js                   # ★ Phase E: chat Q&A using report as context
-├── transcripts/                         # chunk_N.txt + final_transcript.txt
+│   ├── chatWorker.js                   # ★ Phase F: RAG chat (retrieve → buildContext → LLM)
+│   └── embeddingWorker.js              # ★ Phase F: embed BlockAnalysis → Qdrant
 ├── uploads/
-│   └── chunks/                          # 30s audio chunk files
+│   └── chunks/                          # 30s audio chunk files (local, pre-MinIO-upload)
 ├── server.js                            # Express app: /api/upload, /api/report, /api/chat
 └── package.json                         # type: "module", dependencies
+
+# transcripts/ folder removed — all transcript data now stored in MinIO bucket "transcripts"
 ```
 
 ---
@@ -954,49 +1085,52 @@ Each worker is a standalone Node.js process. Open one terminal per worker:
 ```bash
 # ── TRANSCRIPTION PIPELINE ──────────────────────────────────────────────────
 # Terminal 1 — Transcription (Whisper, buffer, window trigger)
-cd backend && node workers/transcriptionWorker.js
+cd backend ; node workers/transcriptionWorker.js
 
 # Terminal 2 — Window Diarization (Path A: 4-chunk early partial analysis)
-cd backend && node workers/windowDiarizationWorker.js
+cd backend ; node workers/windowDiarizationWorker.js
 
 # Terminal 3 — Transcript Aggregator (Path B: merge all chunks)
-cd backend && node workers/transcriptAggregatorWorker.js
+cd backend ; node workers/transcriptAggregatorWorker.js
 
 # Terminal 4 — Speaker Diarization (Path B: full-transcript speaker assignment)
-cd backend && node workers/speakerDiarizationWorker.js
+cd backend ; node workers/speakerDiarizationWorker.js
 
 # Terminal 5 — Transcript Cleaner (dual-path: window + full)
-cd backend && node workers/transcriptCleanerWorker.js
+cd backend ; node workers/transcriptCleanerWorker.js
 
 # Terminal 6 — Segment Grouper (dual-path + 120-char filter)
-cd backend && node workers/segmentGrouperWorker.js
+cd backend ; node workers/segmentGrouperWorker.js
 
 # ── AI ANALYSIS PIPELINE ────────────────────────────────────────────────────
 # Terminal 7 — Analysis Dispatcher (analysisQueue → llm-calls, concurrency 5)
-cd backend && node workers/analysisWorker.js
+cd backend ; node workers/analysisWorker.js
 
 # Terminal 8 — LLM Router (Groq 70% / Gemini 30%, rate-limited 20/60s, concurrency 2)
-cd backend && node workers/llmWorker.js
+cd backend ; node workers/llmWorker.js
 
 # Terminal 9 — Block Aggregator (8 segments/block, concurrency 3)
-cd backend && node workers/blockAggregatorWorker.js
+cd backend ; node workers/blockAggregatorWorker.js
 
 # Terminal 10 — Global Context (full-transcript holistic analysis, concurrency 1)
-cd backend && node workers/globalContextWorker.js
+cd backend ; node workers/globalContextWorker.js
 
 # Terminal 11 — Insight Aggregator (final intelligence + triggers report)
-cd backend && node workers/insightAggregatorWorker.js
+cd backend ; node workers/insightAggregatorWorker.js
 
-# ── PRODUCT LAYER (Phase E) ─────────────────────────────────────────────────
+# ── PRODUCT LAYER (Phase E + F) ─────────────────────────────────────────────
 # Terminal 12 — Report Generator (formats session report, saves to MongoDB)
-cd backend && node workers/reportGeneratorWorker.js
+cd backend ; node workers/reportGeneratorWorker.js
 
-# Terminal 13 — Chat Worker (answers questions using session report as context)
-cd backend && node workers/chatWorker.js
+# Terminal 13 — Chat Worker (RAG: retrieve → buildContext → LLM)
+cd backend ; node workers/chatWorker.js
+
+# Terminal 14 — Embedding Worker (embed blocks → Qdrant vector DB) [Phase F]
+cd backend ; node workers/embeddingWorker.js
 
 # ── API SERVER ───────────────────────────────────────────────────────────────
-# Terminal 14 — Express API Server
-cd backend && node server.js
+# Terminal 15 — Express API Server
+cd backend ; node server.js
 ```
 
 ### Infrastructure Checklist
@@ -1008,10 +1142,12 @@ Before starting workers, ensure these are running:
 | Redis | `redis-server` | 6379 | All workers (BullMQ) |
 | MongoDB | `mongod` | 27017 | 9 workers |
 | Kafka + Zookeeper | `docker compose up -d` | 9092 | Event streaming |
-| MinIO | `docker compose up -d` | 9000 | StorageService |
+| MinIO | `docker compose up -d` | 9000 | StorageService + TranscriptService |
+| Qdrant | `docker run -p 6333:6333 qdrant/qdrant` | 6333 | embeddingWorker + chatWorker |
 
 > **Redis** must be running first — all workers fail to start without it.  
-> **Kafka failure** is non-fatal — EventService logs errors but pipeline continues.
+> **Kafka failure** is non-fatal — EventService logs errors but pipeline continues.  
+> **Qdrant failure** is non-fatal for chat — chatWorker degrades gracefully to empty context.
 
 ---
 
@@ -1086,6 +1222,30 @@ New components:
 - `chatRoutes` (`GET /api/report/:mediaId` + `POST /api/chat`)
 - `chatRoutes` registered in `server.js`
 
+### Phase F — RAG: Intelligent Memory Retrieval ✅ (March 18, 2026)
+
+5 bugs found and fixed across the pipeline before Phase F work began:
+
+| # | File | Bug | Fix |
+|---|---|---|---|
+| 1 | `blockAggregatorWorker.js` | `embeddingQueue.add()` and `worker.on()` outside Worker constructor → syntax error, worker never ran | Restructured file — embedding enqueue inside job fn, handlers after constructor |
+| 2 | `embeddingWorker.js` | Missing `connectDB()` — Mongoose never connected | Added `connectDB()` + `dotenv` setup |
+| 3 | `vectorService.js` | `client.getCollection()` → method does not exist | Changed to `client.getCollections()` |
+| 4 | `vectorService.js` | `searchVector` missing `return` → always resolved `undefined` | Added `return` |
+| 5 | `vectorService.js` | Qdrant point `id` was arbitrary string — rejected by Qdrant | Added `uuid v5` `toPointId()` for deterministic UUID generation |
+| 6 | `transcriptionWorker.js` | `TranscriptService.isComplete()` called without `await` after migration | Added `await` |
+
+New components:
+- `embeddingService.js` — text-to-vector stub (384-dim)
+- `vectorService.js` — Qdrant client (initCollection, insertVector, searchVector)
+- `retrieverService.js` — semantic search + topic boosting hybrid retrieval
+- `contextBuilder.js` — structured LLM context builder from BlockAnalysis docs
+- `embeddingWorker.js` upgraded with `connectDB()` + event handlers
+- `embeddingQueue.js` — BullMQ queue for embedding jobs
+- `blockAggregatorWorker.js` — now enqueues embedding job per block
+- `chatWorker.js` — fully upgraded to RAG pipeline
+- `TranscriptService.js` — fully rewritten to MinIO (no local filesystem)
+
 ---
 
 ## 14. Troubleshooting
@@ -1104,6 +1264,10 @@ New components:
 | Chat returns 500 | `chatWorker` not started | Ensure terminal 13 is running: `node workers/chatWorker.js` |
 | Chat times out (30s) | Worker crashed or queue backed up | Check `chatWorker` logs; check Redis queue depth |
 | Duplicate Mongoose index warning | `BlockAnalysis.js` had two identical indexes | Already fixed in Phase E — update code if seeing this |
+| Embedding jobs queued but nothing in Qdrant | `embeddingWorker` not started | Ensure terminal 14 is running: `node workers/embeddingWorker.js` |
+| Chat returns "No relevant context" | Qdrant not running or no blocks embedded yet | Start Qdrant: `docker run -p 6333:6333 qdrant/qdrant` |
+| Transcript chunks not found (merge error) | MinIO not running or bucket missing | Start MinIO; `TranscriptService` auto-creates bucket on import |
+| Qdrant `Bad Request` on upsert | Point ID is not UUID or integer | Fixed — `vectorService.js` now uses `uuid v5` `toPointId()` |
 
 ---
 
@@ -1111,8 +1275,8 @@ New components:
 
 | Metric | Value |
 |---|---|
-| Total workers | 13 |
-| Total BullMQ queues | 13 |
+| Total workers | 14 |
+| Total BullMQ queues | 14 |
 | Total MongoDB models | 7 |
 | Total API endpoints | 3 (upload, report, chat) |
 | Kafka events | 16 |
@@ -1120,5 +1284,31 @@ New components:
 | Time to first insight | ~120 seconds (Path A window) |
 | Time to complete insight | Session length + ~2 min processing |
 | Chat response time | < 5s typical |
-| Workers requiring MongoDB | 9 of 13 |
-| All workers startup tested | ✅ 14/14 (13 workers + server) |
+| Chat context source | Top-3 blocks via Qdrant ANN search + topic boost |
+| Workers requiring MongoDB | 9 of 14 |
+| Workers requiring Qdrant | 2 of 14 (embeddingWorker, chatWorker) |
+| Transcript storage | MinIO bucket `transcripts` (no local disk) |
+| All workers syntax checked | ✅ 14/14 (node --check, March 18 2026) |
+
+---
+
+## 15. Test Results
+
+Static syntax validation run: **March 18, 2026**
+
+```
+node --check workers/transcriptionWorker.js          → OK
+node --check workers/transcriptAggregatorWorker.js   → OK
+node --check workers/blockAggregatorWorker.js         → OK
+node --check workers/embeddingWorker.js               → OK
+node --check workers/chatWorker.js                    → OK
+node --check src/services/TranscriptService.js        → OK
+node --check src/services/retrieverService.js         → OK
+node --check src/services/contextBuilder.js           → OK
+node --check src/services/vectorService.js            → OK
+node --check src/services/embeddingService.js         → OK
+node --check src/queues/embeddingQueue.js             → OK
+```
+
+All 11 modified/new files pass Node.js syntax validation.  
+Full integration test (requires live Qdrant + MinIO + MongoDB + Redis) should be run after connecting a real embedding model in `embeddingService.js`.

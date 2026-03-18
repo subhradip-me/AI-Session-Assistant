@@ -3,8 +3,9 @@ import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import redis from "../src/config/redis.js";
-import SessionReport from "../src/models/SessionReport.js";
 import AIAnalysisService from "../src/services/AIAnalysisService.js";
+import { retrieve } from "../src/services/retrieverService.js";
+import { buildContext } from "../src/services/contextBuilder.js";
 import connectDB from "../src/config/db.js";
 
 // Load environment variables
@@ -22,36 +23,54 @@ const worker = new Worker(
   async (job) => {
     const { mediaId, question } = job.data;
 
-    // Fetch the session report to use as context
-    const report = await SessionReport.findOne({ mediaId });
+    console.log(`💬 [${mediaId}] Question: "${question}"`);
 
-    if (!report) {
-      console.warn(`⚠️  No report found for ${mediaId} — answering without context`);
+    // ── 1. Retrieve most relevant blocks via semantic + topic-boosted search ──
+    let retrieved = [];
+    try {
+      retrieved = await retrieve(mediaId, question);
+      console.log(`   🔍 Retrieved ${retrieved.length} relevant block(s)`);
+    } catch (err) {
+      console.warn(`   ⚠️  Retrieval failed (${err.message}) — falling back to report-only mode`);
     }
 
-    const context = report?.content || "No session report available yet.";
+    // ── 2. Build structured context from retrieved blocks ─────────────────────
+    let context = "";
+    try {
+      if (retrieved.length > 0) {
+        context = await buildContext(mediaId, retrieved);
+      }
+    } catch (err) {
+      console.warn(`   ⚠️  Context build failed (${err.message})`);
+    }
 
-    const prompt = `You are an AI session assistant. A user is asking a question about a recorded session.
+    if (!context) {
+      context = "No relevant context could be retrieved for this query.";
+    }
 
-Session Report:
+    // ── 3. Compose LLM prompt ─────────────────────────────────────────────────
+    const prompt = `You are an AI session assistant. Your job is to answer questions about a recorded meeting or session.
+
+Context (retrieved from the session):
 ${context}
 
 User Question:
 ${question}
 
 Instructions:
-- Answer clearly and specifically based on the session content above.
-- If the answer is not covered in the session, say so honestly.
+- Answer clearly and specifically based only on the context above.
+- If the answer is not present in the context, say so honestly — do not invent information.
 - Keep the answer concise but complete.
-- Do not make up information not present in the report.
+- Reference specific blocks or timestamps where relevant.
 
 Answer:`;
 
+    // ── 4. Generate answer ────────────────────────────────────────────────────
     const answer = await AIAnalysisService.groqChat(prompt, 0.3);
 
-    console.log(`💬 Chat answer generated for ${mediaId}`);
+    console.log(`✅ Chat answer generated for ${mediaId}`);
 
-    return { answer };
+    return { answer, retrievedBlocks: retrieved.length };
   },
   {
     connection: redis,

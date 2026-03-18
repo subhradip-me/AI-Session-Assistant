@@ -1,1 +1,0 @@
-In fact, we have a lot of ideas. Let's study the space time complexity.

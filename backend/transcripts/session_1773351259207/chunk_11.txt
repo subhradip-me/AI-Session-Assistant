@@ -1,1 +1,0 @@
-If you can do DSA in Rust, you can do DSA in Rust.

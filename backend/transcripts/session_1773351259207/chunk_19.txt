@@ -1,1 +1,0 @@
-So I am that guy who was building a product around DP/DP Act. By the way, I am having a problem with self-host DP/DP Act. Okay. I self-hosted a life kit server. Now I am having trouble making it scale. We can't just horizontally scale it. You can horizontally scale it. There is a graph life kit case.
