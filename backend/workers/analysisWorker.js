@@ -23,13 +23,13 @@ console.log("   concurrency: 5");
 const worker = new Worker(
     "analysisQueue",
     async (job) => {
-        const { mediaId, segmentId, text, totalSegments } = job.data;
+    const { mediaId, windowId, segmentId, text, totalSegments } = job.data;
 
         console.log(`📋 Dispatching segment ${segmentId}/${totalSegments - 1} for ${mediaId} → llm-calls`);
 
         await llmQueue.add(
             "segment-analysis",
-            { mediaId, segmentId, text, totalSegments },
+            { mediaId, windowId, segmentId, text, totalSegments },
             {
                 // Deduplicate: if the same segment is re-dispatched (e.g. on retry),
                 // BullMQ will reuse the existing queued job rather than add a duplicate.
@@ -44,6 +44,7 @@ const worker = new Worker(
 
         await EventService.emit("SEGMENT_DISPATCHED", {
             mediaId,
+            windowId,
             segmentId,
             totalSegments
         });

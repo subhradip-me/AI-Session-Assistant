@@ -76,32 +76,35 @@ const worker = new Worker(
         return { groupCount: 0, validCount: 0 };
       }
 
-      // Enqueue only valid segments for AI analysis
-      // For window-based: use window-based segmentIds (already strings from diarization)
-      console.log(`  → Enqueueing ${validGroups.length} segments for AI analysis`);
+      // Enqueue all valid segments in PARALLEL for AI analysis.
+      // Promise.all fires all queue.add() calls simultaneously so grouper
+      // never stalls waiting for Redis round-trips one-by-one.
+      console.log(`  → Enqueueing ${validGroups.length} segments for AI analysis (parallel)`);
 
-      for (let i = 0; i < validGroups.length; i++) {
-        // Generate segment ID based on context
-        // Window: already has segmentId from earlier (e.g., "window-0-3-0")
-        // Full: needs numeric ID
-        const segmentId = validGroups[i].segmentId ?? i;
+      await Promise.all(
+        validGroups.map((group, i) => {
+          // Generate segment ID based on context
+          // Window: already has segmentId from earlier (e.g., "window-0-3-0")
+          // Full: needs numeric ID
+          const segmentId = group.segmentId ?? i;
 
-        await analysisQueue.add(
-          "analyze-segment",
-          {
-            mediaId,
-            windowId, // pass through if present
-            segmentId,
-            text: validGroups[i].text,
-            totalSegments: validGroups.length
-          },
-          {
-            jobId: isWindowJob
-              ? `analysis-${segmentId}`
-              : `analysis-${mediaId}-${i}`
-          }
-        );
-      }
+          return analysisQueue.add(
+            "analyze-segment",
+            {
+              mediaId,
+              windowId, // pass through if present
+              segmentId,
+              text: group.text,
+              totalSegments: validGroups.length
+            },
+            {
+              jobId: isWindowJob
+                ? `analysis-${segmentId}`
+                : `analysis-${mediaId}-${i}`
+            }
+          );
+        })
+      );
 
       return {
         mediaId,

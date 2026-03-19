@@ -1,7 +1,7 @@
 # AI Session Assistant — Architecture Documentation
 
-**Version**: 5.1.0 (Phase F — RAG: Real Semantic Embeddings via Ollama)  
-**Last Updated**: March 18, 2026  
+**Version**: 5.2.0 (Phase 6.6 — Non-Blocking Concurrent Pipeline for Live Streaming)  
+**Last Updated**: March 19, 2026  
 **Status**: ✅ Fully Operational — 14 workers, 14 queues, 3 API endpoints, 7 models
 
 ---
@@ -39,6 +39,8 @@ The AI Session Assistant is an event-driven, microservices-style pipeline that p
 | Principle | Implementation |
 |---|---|
 | **Parallel processing** | Two independent pipelines (early window + full transcript) feed the same analysis queue |
+| **Non-blocking workers** | Worker threads never stall — no polling loops; `blockAggregatorWorker` owns block-completion logic; `llmWorker` is a safety-net only |
+| **Parallel enqueuing** | `segmentGrouperWorker` dispatches all segments via `Promise.all` — no serial Redis round-trips |
 | **Rate-limit resilience** | LLM calls routed through a rate-limited BullMQ queue; Groq → Gemini automatic fallback |
 | **Idempotency** | All BullMQ jobs use deterministic `jobId` to prevent duplicate processing on retry |
 | **Hierarchical dedup** | Every 8 segments → 1 Block → Final session intelligence (80–90% fewer LLM calls) |
@@ -324,20 +326,23 @@ segmentGrouperWorker  [queue: segment-grouper]
   else:
     emit WINDOW_GROUPED_READY (Kafka)
   
-  for each validGroup:
+  // All segments enqueued in parallel — no serial await per segment
+  await Promise.all(validGroups.map((group, i) => {
     segmentId = group.segmentId ?? i   (string for window, number for full)
-    analysisQueue.add({ mediaId, windowId, segmentId, text, totalSegments },
+    return analysisQueue.add({ mediaId, windowId, segmentId, text, totalSegments },
       { jobId: isWindowJob ? analysis-${segmentId} : analysis-${mediaId}-${i} })
+  }))
 ```
 
 ### Step 7 — Analysis Dispatch
 
 ```
 analysisWorker  [queue: analysisQueue, concurrency: 5]
+  // windowId forwarded so window-based jobs carry context end-to-end
   llmQueue.add("segment-analysis",
-    { mediaId, segmentId, text, totalSegments },
+    { mediaId, windowId, segmentId, text, totalSegments },
     { jobId: llm-${mediaId}-${segmentId} })   ← deduplication guard
-  emit SEGMENT_DISPATCHED (Kafka)
+  emit SEGMENT_DISPATCHED (Kafka, includes windowId)
 ```
 
 ### Step 7a — LLM Processing
@@ -363,10 +368,13 @@ llmWorker  [queue: llm-calls, concurrency: 2, limit: 20/60s]
      blockQueue.add({ mediaId, blockId, segmentIds[8], totalBlocks },
        { jobId: block-${mediaId}-${blockId} })
 
-  6. Final aggregation: if SegmentAnalysis.count >= totalSegments:
-     poll for all BlockAnalysis docs (up to 120s, check every 2s)
-     insightAggregationQueue.add({ mediaId, totalSegments },
-       { jobId: final-aggregate-${mediaId} })   ← same jobId as blockAggregatorWorker!
+  6. Final aggregation safety-net (non-blocking):
+     PRIMARY ownership of final aggregation belongs to blockAggregatorWorker.
+     llmWorker is a lightweight safety-net only:
+       if SegmentAnalysis.count(numeric) >= totalSegments:
+         insightAggregationQueue.add({ mediaId, totalSegments, totalBlocks },
+           { jobId: final-aggregate-${mediaId} })   ← BullMQ deduplicates if both fire
+     ⚠️  No polling loop — worker thread never stalls waiting for blocks.
 ```
 
 ### Step 7b — Block Aggregation
@@ -1185,6 +1193,15 @@ Backoff uses `min(groqDelay, geminiDelay)` (not max). Full Kafka event coverage 
 
 ### Phase 6.5 — Idempotency & Restart Safety ✅
 DB idempotency guard in `llmWorker` (skips already-analyzed segments). Rolling context race fix (`summary: { $exists: true }`). Dispatcher dedup (`jobId` on analysisQueue). Aggregation dedup logging.
+
+### Phase 6.6 — Non-Blocking Concurrent Pipeline ✅ (March 19, 2026)
+Fixes to ensure all pipeline stages work simultaneously without any worker thread ever stalling:
+
+| # | File | Problem | Fix |
+|---|---|---|---|
+| 1 | `llmWorker.js` | Blocking `while` poll (up to 120s) waiting for `BlockAnalysis` docs before enqueueing final aggregation — stalled 1 of 2 LLM worker slots | Removed poll entirely; `blockAggregatorWorker` is now the primary final-aggregation trigger; `llmWorker` enqueues immediately as a non-blocking safety-net (same `jobId` deduplicates) |
+| 2 | `segmentGrouperWorker.js` | Serial `for (await each)` loop for `analysisQueue.add()` — N Redis round-trips in sequence before grouper job could complete | Replaced with `Promise.all(validGroups.map(...))` — all segments enqueued simultaneously |
+| 3 | `analysisWorker.js` | `windowId` was silently dropped — not forwarded from `analysisQueue` job to `llmQueue` or `SEGMENT_DISPATCHED` event | Added `windowId` to destructured input, `llmQueue.add()` payload, and `EventService.emit()` |
 
 ### Phase B — Hierarchical Intelligence ✅
 Time-based 90s grouping. Block aggregation (8 segments/block). `BlockAnalysis` collection. `insightAggregatorWorker` reads 40 blocks instead of 320 segments. **80–90% fewer LLM calls** for long sessions.

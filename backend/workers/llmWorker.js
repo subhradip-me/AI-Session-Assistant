@@ -233,56 +233,39 @@ const worker = new Worker(
     }
 
 
-    // ── 5. Final aggregation trigger ────────────────────────────────────────
-    //   Once ALL segments are analyzed, enqueue the final session intelligence job.
-    //   Use >= (not ===) as a safety net in case a previous run left orphaned docs.
-    //   Count only numeric segmentIds (Path B) — string window IDs must not
-    //   falsely inflate the count and cause premature final aggregation.
-    const analysisCount = await SegmentAnalysis.countDocuments({
-      mediaId,
-      segmentId: { $type: "number" }
-    });
+    // ── 5. Final aggregation trigger (safety-net) ───────────────────────────
+    //   blockAggregatorWorker is the primary trigger for final aggregation —
+    //   it fires after every block completes and checks if all blocks are done.
+    //   This path is a lightweight safety-net: if ALL segments are analyzed but
+    //   the last block happened to skip the blockAggregator trigger (e.g. the
+    //   block boundary didn't land on segment N-1), we enqueue here immediately
+    //   WITHOUT blocking — the shared jobId guarantees BullMQ deduplication.
+    //
+    //   IMPORTANT: No polling loop here. Worker threads must never be stalled.
+    //   blockAggregatorWorker handles the "wait for all blocks" logic itself.
+    if (isNumericSegmentId) {
+      const analysisCount = await SegmentAnalysis.countDocuments({
+        mediaId,
+        segmentId: { $type: "number" }
+      });
 
-    if (isNumericSegmentId && analysisCount >= totalSegments) {
-      console.log(`✅ All ${totalSegments} segments analyzed for ${mediaId} — waiting for block processing...`);
+      if (analysisCount >= totalSegments) {
+        const totalBlocks = Math.ceil(totalSegments / SEGMENTS_PER_BLOCK);
+        console.log(`✅ All ${totalSegments} segments analyzed for ${mediaId} — enqueuing final aggregation (safety-net)`);
 
-      // Poll for all blocks to be processed (up to 120s)
-      const totalBlocks = Math.ceil(totalSegments / SEGMENTS_PER_BLOCK);
-      let blockCount = 0;
-      let attempts = 0;
-
-      while (attempts < 60) {
-        const { default: BlockAnalysis } = await import("../src/models/BlockAnalysis.js");
-        blockCount = await BlockAnalysis.countDocuments({ mediaId });
-
-        if (blockCount >= totalBlocks) {
-          console.log(`✅ All ${totalBlocks} blocks processed for ${mediaId}`);
-          break;
-        }
-
-        console.log(`⏳ Blocks not ready (${blockCount}/${totalBlocks}), retrying in 2s...`);
-        await new Promise(r => setTimeout(r, 2000));
-        attempts++;
+        // jobId must match blockAggregatorWorker exactly — BullMQ deduplicates
+        // if both paths fire at the same time.
+        const agg = await insightAggregationQueue.add(
+          "aggregate-insights",
+          { mediaId, totalSegments, totalBlocks },
+          {
+            jobId: `final-aggregate-${mediaId}`,
+            removeOnComplete: true,
+            removeOnFail: { count: 20 }
+          }
+        );
+        console.log(`📊 Aggregation safety-net job enqueued: ${agg.id}`);
       }
-
-      if (blockCount < totalBlocks) {
-        console.warn(`⚠️  Block processing timed out (${blockCount}/${totalBlocks}) — proceeding with available blocks`);
-      }
-
-      // Attempt to enqueue final aggregation. The jobId ensures idempotency — if
-      // multiple workers try to add this job simultaneously (e.g. both llmWorker
-      // and blockAggregatorWorker fire at the same time), only one will be
-      // enqueued. IMPORTANT: this jobId must match blockAggregatorWorker exactly.
-      const agg = await insightAggregationQueue.add(
-        "aggregate-insights",
-        { mediaId, totalSegments, totalBlocks },
-        {
-          jobId: `final-aggregate-${mediaId}`,
-          removeOnComplete: true,
-          removeOnFail: { count: 20 }
-        }
-      );
-      console.log(`📊 Aggregation job enqueued: ${agg.id}`);
     }
   },
   {
