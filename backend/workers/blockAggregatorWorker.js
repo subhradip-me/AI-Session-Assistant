@@ -40,7 +40,7 @@ console.log("   block size : 8 segments");
 const worker = new Worker(
   "block-aggregation",
   async (job) => {
-    const { mediaId, blockId, segmentIds, totalBlocks } = job.data;
+    const { mediaId, blockId, segmentIds, totalBlocks, userId } = job.data;
 
     console.log(`🧱 Processing block ${blockId}/${totalBlocks - 1} (segments ${segmentIds[0]}-${segmentIds[segmentIds.length - 1]}) for ${mediaId}`);
 
@@ -101,6 +101,7 @@ const worker = new Worker(
       { mediaId, blockId },
       {
         mediaId,
+        userId,
         blockId,
         segments: segmentIds,
         start: firstSeg.start || 0,
@@ -136,7 +137,7 @@ const worker = new Worker(
       // double-processing only when the jobId is identical in both callers.
       const agg = await insightAggregationQueue.add(
         "aggregate-insights",
-        { mediaId, totalBlocks },
+        { mediaId, userId, totalBlocks },
         {
           jobId: `final-aggregate-${mediaId}`,
           removeOnComplete: true,
@@ -149,12 +150,28 @@ const worker = new Worker(
     // ── 9. Enqueue embedding for this block ───────────────────────────────
     await embeddingQueue.add(
       "embed-block",
-      { mediaId, blockId },
+      { mediaId, userId, blockId, type: "block" },
       {
         jobId: `embed-${mediaId}-${blockId}`,
         removeOnComplete: true
       }
     );
+
+    // ── 10. Enqueue segment embeddings for every segment in this block ──────
+    await Promise.all(
+      segmentIds.map(sid =>
+        embeddingQueue.add(
+          "embed-segment",
+          { mediaId, userId, segmentId: sid, blockId, type: "segment" },
+          {
+            jobId: `embed-seg-${mediaId}-${sid}`,
+            removeOnComplete: true
+          }
+        )
+      )
+    );
+
+    console.log(`   📌 Enqueued ${segmentIds.length} segment embedding job(s) for block ${blockId}`);
   },
   {
     connection: redis,

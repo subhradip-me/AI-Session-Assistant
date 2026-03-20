@@ -14,7 +14,7 @@ const worker = new Worker(
   "segment-grouper",
   async (job) => {
     try {
-      const { mediaId, segments, windowId } = job.data;
+      const { mediaId, segments, windowId, userId } = job.data;
 
       // Check if this is a window-based grouping
       const isWindowJob = !!windowId;
@@ -76,34 +76,34 @@ const worker = new Worker(
         return { groupCount: 0, validCount: 0 };
       }
 
-      // Enqueue all valid segments in PARALLEL for AI analysis.
-      // Promise.all fires all queue.add() calls simultaneously so grouper
-      // never stalls waiting for Redis round-trips one-by-one.
-      console.log(`  → Enqueueing ${validGroups.length} segments for AI analysis (parallel)`);
+      // Build the segment list to send as a SINGLE batch job.
+      // analysisWorker will process each segment sequentially inside the job,
+      // waiting for all llmWorker completions before the batch job is marked done.
+      // This ensures window-2 never starts dispatching to llmWorker until
+      // window-1's batch job has fully completed.
+      const batchSegments = validGroups.map((group, i) => ({
+        segmentId: group.segmentId ?? i,
+        text: group.text
+      }));
 
-      await Promise.all(
-        validGroups.map((group, i) => {
-          // Generate segment ID based on context
-          // Window: already has segmentId from earlier (e.g., "window-0-3-0")
-          // Full: needs numeric ID
-          const segmentId = group.segmentId ?? i;
+      const batchJobId = isWindowJob
+        ? `analysis-batch-${windowId}`
+        : `analysis-batch-${mediaId}`;
 
-          return analysisQueue.add(
-            "analyze-segment",
-            {
-              mediaId,
-              windowId, // pass through if present
-              segmentId,
-              text: group.text,
-              totalSegments: validGroups.length
-            },
-            {
-              jobId: isWindowJob
-                ? `analysis-${segmentId}`
-                : `analysis-${mediaId}-${i}`
-            }
-          );
-        })
+      console.log(
+        `  → Enqueueing 1 batch job (${batchSegments.length} segments) → analysisQueue [${batchJobId}]`
+      );
+
+      await analysisQueue.add(
+        "analyze-batch",
+        {
+          mediaId,
+          userId,
+          windowId,
+          totalSegments: batchSegments.length,
+          segments: batchSegments
+        },
+        { jobId: batchJobId }
       );
 
       return {

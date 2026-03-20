@@ -57,7 +57,7 @@ new Worker(
   "global-context",
   async (job) => {
 
-    const { mediaId, transcript } = job.data;
+    const { mediaId, userId, transcript } = job.data;
 
     console.log(`🌍 Generating global context for ${mediaId}`);
 
@@ -86,6 +86,7 @@ new Worker(
       { mediaId },
       {
         mediaId,
+        userId,
         summary:  finalContext.summary,
         topics:   finalContext.topics,
         insights: finalContext.insights

@@ -9,7 +9,7 @@ import TranscriptBufferService from "../src/services/TranscriptBufferService.js"
 import EventService from "../src/services/EventService.js";
 import AIAnalysisService from "../src/services/AIAnalysisService.js";
 import reportQueue from "../src/queues/reportQueue.js";
-//import SessionReport from "../src/models/SessionReport.js";
+import { updateMemory } from "../src/services/memoryService.js";
 import connectDB from "../src/config/db.js";
 
 // Load environment variables
@@ -137,7 +137,7 @@ const worker = new Worker(
   "insight-aggregation",
   async (job) => {
 
-    const { mediaId, totalSegments } = job.data;
+    const { mediaId, totalSegments, userId } = job.data;
 
     console.log(`🔄 Aggregating insights for ${mediaId} (${totalSegments} segments)`);
 
@@ -171,15 +171,23 @@ const worker = new Worker(
       
     await reportQueue.add("create-session-report", {
       mediaId,
+      userId,
       intelligence
     },
-  {
-    jobId: `create-session-report-${mediaId}`,
-    removeOnComplete: true,
-    removeOnFail: true
-  });
+    {
+      jobId: `create-session-report-${mediaId}`,
+      removeOnComplete: true,
+      removeOnFail: true
+    });
 
     console.log(`✅ Session report job added for ${mediaId}`);
+
+    // === UPDATE LONG-TERM MEMORY ===
+    // Fire-and-forget: memory failure must never block or crash this worker.
+    // userId may be undefined for anonymous sessions — updateMemory guards that.
+    updateMemory(userId, intelligence).catch(err =>
+      console.error(`❌ Memory update failed for ${mediaId}:`, err.message)
+    );
 
   },
   {

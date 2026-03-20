@@ -3,8 +3,13 @@ import mongoose from "mongoose";
 const SessionContextSchema = new mongoose.Schema({
 
   mediaId: {
-    type: String,
+    type:     String,
     required: true,
+    index:    true
+  },
+
+  userId: {
+    type:  String,
     index: true
   },
 

@@ -9,7 +9,7 @@ const worker = new Worker(
   "transcript-cleaner",
   async (job) => {
     try {
-      const { mediaId, segments, windowId } = job.data;
+      const { mediaId, segments, windowId, userId } = job.data;
 
       // Check if this is a window-based cleaning (from windowDiarizationWorker)
       const isWindowJob = !!windowId;
@@ -46,7 +46,8 @@ const worker = new Worker(
         "group",
         {
           mediaId,
-          windowId, // pass through if present
+          userId,
+          windowId,
           segments: cleanedSegments
         },
         {

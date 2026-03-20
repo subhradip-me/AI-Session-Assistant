@@ -1,0 +1,130 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+:root {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  scrollbar-gutter: stable;
+}
+
+/* Custom Scrollbar (Notion Style) */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(55, 53, 47, 0.08);
+  border-radius: 20px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(55, 53, 47, 0.16);
+}
+
+/* Micro-animations */
+@keyframes fadeInScale {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-fade-in-scale {
+  animation: fadeInScale 0.2s ease-out forwards;
+}
+
+/* Transition utility for smooth hover states */
+.transition-notion {
+  transition: all 120ms ease-in-out;
+}
+
+/* Base resets or specific tweaks */
+body {
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Report body typography (ChatGPT-style) ────────────────────────────────── */
+.report-body {
+  color: #374151;          /* gray-700 — warm readable dark */
+  font-size: 16px;
+  line-height: 1.75;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+.report-body .md-h1 {
+  font-size: 1.75rem;      /* 28px */
+  font-weight: 700;
+  color: #111827;          /* near-black */
+  margin: 2rem 0 0.75rem;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+}
+
+.report-body .md-h2 {
+  font-size: 1.25rem;      /* 20px */
+  font-weight: 650;
+  color: #1f2937;
+  margin: 1.75rem 0 0.5rem;
+  letter-spacing: -0.01em;
+  line-height: 1.35;
+}
+
+.report-body .md-h3 {
+  font-size: 1rem;         /* 16px */
+  font-weight: 600;
+  color: #374151;
+  margin: 1.25rem 0 0.25rem;
+  text-transform: none;    /* override any uppercase that was there before */
+  letter-spacing: 0;
+}
+
+.report-body .md-p {
+  margin: 0.35rem 0;
+  color: #374151;
+}
+
+.report-body .md-spacer {
+  height: 0.75rem;
+}
+
+.report-body .md-ul {
+  list-style: none;
+  margin: 0.5rem 0 0.75rem;
+  padding: 0;
+}
+
+.report-body .md-li {
+  position: relative;
+  padding-left: 1.25rem;
+  margin: 0.3rem 0;
+  color: #374151;
+}
+
+.report-body .md-li::before {
+  content: '•';
+  position: absolute;
+  left: 0;
+  color: #9ca3af;           /* muted gray bullet */
+  font-size: 1.1em;
+  line-height: 1.7;
+}
+
+.report-body strong {
+  font-weight: 600;
+  color: #111827;
+}
+
+.report-body em {
+  font-style: italic;
+  color: #4b5563;
+}

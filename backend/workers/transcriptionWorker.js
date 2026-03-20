@@ -21,7 +21,7 @@ const worker = new Worker(
     try {
     console.log("Incoming job data:", job.data);
 
-    const { mediaId, chunkIndex, chunkName, chunkPath } = job.data;
+    const { mediaId, chunkIndex, chunkName, chunkPath, userId } = job.data;
 
     // fallback if path not provided
     const finalPath =
@@ -56,9 +56,10 @@ const worker = new Worker(
       await windowDiarizationQueue.add(
         "diarize-window",
         {
-          mediaId: window.mediaId,
-          windowId: window.windowId,
-          chunkRange: window.chunkRange,
+          mediaId:     window.mediaId,
+          userId,
+          windowId:    window.windowId,
+          chunkRange:  window.chunkRange,
           combinedText
         },
         {
@@ -93,7 +94,8 @@ const worker = new Worker(
     if (done) {
       console.log("✅ All chunks complete! Notifying aggregator...");
       await aggregationQueue.add("aggregate", {
-        mediaId
+        mediaId,
+        userId
       });
       // Emit session-level completion event
       await EventService.emit("TRANSCRIPTION_COMPLETE", {

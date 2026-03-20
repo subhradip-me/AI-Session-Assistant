@@ -29,7 +29,7 @@ const worker = new Worker(
   "window-diarization",
   async job => {
     try {
-      const { mediaId, windowId, chunkRange, combinedText } = job.data;
+      const { mediaId, windowId, chunkRange, combinedText, userId } = job.data;
 
       console.log(`\n🎤 [Window Diarization] Processing: ${windowId}`);
       console.log(`   Chunks: ${chunkRange.start} → ${chunkRange.end}`);
@@ -64,6 +64,7 @@ const worker = new Worker(
         "clean-window-segments",
         {
           mediaId,
+          userId,
           windowId,
           segments: windowSegments
         },

@@ -3,12 +3,17 @@ import mongoose from "mongoose";
 const BlockAnalysisSchema = new mongoose.Schema({
 
   mediaId: {
-    type: String,
+    type:     String,
     required: true
   },
 
+  userId: {
+    type:  String,
+    index: true
+  },
+
   blockId: {
-    type: Number,
+    type:     Number,
     required: true
   },
 
@@ -40,7 +45,9 @@ const BlockAnalysisSchema = new mongoose.Schema({
 
 }, { timestamps: true });
 
-// Compound unique index: efficient querying + dedup guard
+// Compound unique index: one block per (session, blockId)
 BlockAnalysisSchema.index({ mediaId: 1, blockId: 1 }, { unique: true });
+// Index for user-scoped queries
+BlockAnalysisSchema.index({ userId: 1, mediaId: 1 });
 
 export default mongoose.model("BlockAnalysis", BlockAnalysisSchema);

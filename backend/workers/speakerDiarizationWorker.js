@@ -13,7 +13,7 @@ const worker = new Worker(
   "speaker-diarization",
   async (job) => {
 
-    const { mediaId, transcript } = job.data;
+    const { mediaId, transcript, userId } = job.data;
 
     console.log("Processing speaker segmentation:", mediaId);
 
@@ -27,6 +27,7 @@ const worker = new Worker(
     // Enqueue transcript cleaning job
     await cleanerQueue.add("clean", {
       mediaId,
+      userId,
       segments: structuredTranscript.segments
     });
 

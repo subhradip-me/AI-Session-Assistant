@@ -1,24 +1,26 @@
 import mongoose from "mongoose";
 
-const SessionReportSchema = new mongoose.Schema({
+const SessionReportSchema = new mongoose.Schema(
+  {
     mediaId: {
-        type: String,
-        required: true
+      type:     String,
+      required: true,
+      index:    true
     },
+
+    userId: {
+      type:  String,
+      index: true
+    },
+
     content: {
-        type: String,
-        required: true
-    },
-    createdAt: {
-        type: Date,
-        default: Date.now
-    },
-    updatedAt: {
-        type: Date,
-        default: Date.now
+      type:     String,
+      required: true
     }
-});
+  },
+  { timestamps: true }
+);
 
-const SessionReport = mongoose.model("SessionReport", SessionReportSchema);
+SessionReportSchema.index({ userId: 1, mediaId: 1 });
 
-export default SessionReport;
+export default mongoose.model("SessionReport", SessionReportSchema);

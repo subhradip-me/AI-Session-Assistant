@@ -4,6 +4,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import UploadController from "../controllers/UploadController.js";
+import { authenticate } from "../middleware/auth.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -29,9 +30,10 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
-// Use controller instead of inline function
+// authenticate ensures req.user.userId is set before the upload handler runs
 router.post(
   "/upload",
+  authenticate,
   upload.single("file"),
   UploadController.uploadFile
 );

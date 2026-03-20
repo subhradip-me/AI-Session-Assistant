@@ -11,7 +11,7 @@ const worker = new Worker(
     "transcript-aggregation",
     async (job) => {
 
-        const { mediaId } = job.data;
+        const { mediaId, userId } = job.data;
 
         console.log("Aggregating transcript for:", mediaId);
 
@@ -28,6 +28,7 @@ const worker = new Worker(
         // Enqueue diarization job (existing pipeline)
         await diarizationQueue.add("diarize", {
             mediaId,
+            userId,
             transcript
         });
 
@@ -35,7 +36,7 @@ const worker = new Worker(
         // jobId prevents duplicate jobs if the aggregator retries
         await globalContextQueue.add(
             "generate-global-context",
-            { mediaId, transcript },
+            { mediaId, userId, transcript },
             {
                 jobId: `context-${mediaId}`,
                 attempts: 1,

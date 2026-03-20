@@ -82,7 +82,7 @@ console.log("   providers   : Groq (70%) + Gemini (30%)");
 const worker = new Worker(
   "llm-calls",
   async (job) => {
-    const { mediaId, segmentId, text, totalSegments } = job.data;
+    const { mediaId, segmentId, text, totalSegments, userId } = job.data;
 
 
     // Idempotency check — if this segment was already analyzed, skip it. This can
@@ -194,7 +194,7 @@ const worker = new Worker(
     // ── 3. Persist result ────────────────────────────────────────────────────
     await SegmentAnalysis.findOneAndUpdate(
       { mediaId, segmentId },
-      { mediaId, segmentId, ...result },
+      { mediaId, userId, segmentId, ...result },
       { upsert: true, new: true }
     );
 
@@ -223,7 +223,7 @@ const worker = new Worker(
 
       await blockQueue.add(
         "aggregate-block",
-        { mediaId, blockId, segmentIds: blockSegmentIds, totalBlocks },
+        { mediaId, userId, blockId, segmentIds: blockSegmentIds, totalBlocks },
         {
           jobId: `block-${mediaId}-${blockId}`,
           removeOnComplete: true,
@@ -257,7 +257,7 @@ const worker = new Worker(
         // if both paths fire at the same time.
         const agg = await insightAggregationQueue.add(
           "aggregate-insights",
-          { mediaId, totalSegments, totalBlocks },
+          { mediaId, userId, totalSegments, totalBlocks },
           {
             jobId: `final-aggregate-${mediaId}`,
             removeOnComplete: true,

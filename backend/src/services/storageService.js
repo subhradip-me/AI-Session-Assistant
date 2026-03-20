@@ -5,7 +5,7 @@ import EventService from "./EventService.js";
 
 class StorageService {
 
-  async uploadChunks(chunkDir, mediaId= "default-session", totalChunks = null) {
+  async uploadChunks(chunkDir, mediaId = "default-session", totalChunks = null, userId = null) {
 
     const bucket = "session-files";
 
@@ -25,7 +25,7 @@ class StorageService {
 
       console.log("Uploaded chunk:", file);
 
-      await EventService.emitChunkCreated(file, mediaId, totalChunks);
+      await EventService.emitChunkCreated(file, mediaId, totalChunks, userId);
 
       uploaded.push(file);
 

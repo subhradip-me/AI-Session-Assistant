@@ -1,0 +1,132 @@
+import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
+import axios from 'axios';
+
+const API_BASE_URL = 'http://localhost:5000/api';
+
+// Thunks
+export const uploadFile = createAsyncThunk(
+  'session/uploadFile',
+  async (file, { getState, rejectWithValue }) => {
+    try {
+      const { auth } = getState();
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await axios.post(`${API_BASE_URL}/upload`, formData, {
+        headers: { 
+          'Content-Type': 'multipart/form-data',
+          'Authorization': `Bearer ${auth.token}`
+        }
+      });
+      return response.data; // { message, sessionId, ... }
+    } catch (err) {
+      return rejectWithValue(err.response.data);
+    }
+  }
+);
+
+export const fetchReport = createAsyncThunk(
+  'session/fetchReport',
+  async (mediaId, { getState, rejectWithValue }) => {
+    try {
+      const { auth } = getState();
+      const response = await axios.get(`${API_BASE_URL}/report/${mediaId}`, {
+        headers: { 'Authorization': `Bearer ${auth.token}` }
+      });
+      return response.data;
+    } catch (err) {
+      return rejectWithValue(err.response.data);
+    }
+  }
+);
+
+export const fetchSessions = createAsyncThunk(
+  'session/fetchSessions',
+  async (_, { getState, rejectWithValue }) => {
+    try {
+      const { auth } = getState();
+      // Assuming GET /api/sessions exists and is isolated by userId on backend
+      const response = await axios.get(`${API_BASE_URL}/sessions`, {
+        headers: { 'Authorization': `Bearer ${auth.token}` }
+      });
+      return response.data;
+    } catch (err) {
+      return rejectWithValue(err.response.data);
+    }
+  }
+);
+
+const sessionSlice = createSlice({
+  name: 'session',
+  initialState: {
+    sessions: [],
+    selectedSessionId: null,
+    currentReport: null,
+    uploading: false,
+    processing: false,
+    error: null,
+  },
+  reducers: {
+    setSelectedSession: (state, action) => {
+      state.selectedSessionId = action.payload;
+      // Reset report state so the new session starts fresh
+      state.currentReport = null;
+      state.processing = false;
+      state.error = null;
+    },
+    clearCurrentReport: (state) => {
+      state.currentReport = null;
+      state.processing = false;
+      state.error = null;
+    },
+    clearSessionError: (state) => {
+      state.error = null;
+    }
+  },
+  extraReducers: (builder) => {
+    builder
+      .addCase(uploadFile.pending, (state) => {
+        state.uploading = true;
+        state.error = null;
+        state.processing = false;
+        state.currentReport = null;
+      })
+      .addCase(uploadFile.fulfilled, (state, action) => {
+        state.uploading = false;
+        state.processing = true;
+        state.selectedSessionId = action.payload.sessionId;
+      })
+      .addCase(uploadFile.rejected, (state, action) => {
+        state.uploading = false;
+        state.error = action.payload?.error || 'Upload failed';
+      })
+      .addCase(fetchReport.fulfilled, (state, action) => {
+        state.currentReport = action.payload;
+        state.processing = false;
+      })
+      .addCase(fetchReport.pending, (state) => {
+        // Don't reset processing here — let fulfilled/rejected handle it
+        state.error = null;
+      })
+      .addCase(fetchReport.rejected, (state, action) => {
+        const msg = action.payload?.error || '';
+        // Keep polling only when the backend explicitly says it's still processing
+        if (msg.includes('processing') || msg.includes('still')) {
+          state.processing = true;
+        } else {
+          state.processing = false;
+          // Only set a visible error if there was actually a report before
+          // (avoids flash of error on first load before report is ready)
+          if (!state.currentReport) {
+            state.error = msg || null;
+          }
+        }
+      })
+      .addCase(fetchSessions.fulfilled, (state, action) => {
+        state.sessions = action.payload;
+      });
+  },
+});
+
+export const { setSelectedSession, clearCurrentReport, clearSessionError } = sessionSlice.actions;
+export default sessionSlice.reducer;

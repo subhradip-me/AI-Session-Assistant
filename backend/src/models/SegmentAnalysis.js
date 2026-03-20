@@ -3,12 +3,17 @@ import mongoose from "mongoose";
 const SegmentAnalysisSchema = new mongoose.Schema({
 
   mediaId: {
-    type: String,
+    type:     String,
     required: true
   },
 
+  userId: {
+    type:  String,
+    index: true
+  },
+
   segmentId: {
-    type: mongoose.Schema.Types.Mixed, // supports both Number (legacy) and String (window-based)
+    type:     mongoose.Schema.Types.Mixed, // Number (Path B) or String (Path A window IDs)
     required: true
   },
 
@@ -22,7 +27,9 @@ const SegmentAnalysisSchema = new mongoose.Schema({
 
 }, { timestamps: true });
 
-// Compound index for efficient querying
+// Compound unique index: one analysis per (session, segment)
 SegmentAnalysisSchema.index({ mediaId: 1, segmentId: 1 }, { unique: true });
+// Index for user-scoped queries: find all analyses for a user
+SegmentAnalysisSchema.index({ userId: 1, mediaId: 1 });
 
 export default mongoose.model("SegmentAnalysis", SegmentAnalysisSchema);

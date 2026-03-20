@@ -1,8 +1,8 @@
 # AI Session Assistant — Architecture Documentation
 
-**Version**: 5.2.0 (Phase 6.6 — Non-Blocking Concurrent Pipeline for Live Streaming)  
-**Last Updated**: March 19, 2026  
-**Status**: ✅ Fully Operational — 14 workers, 14 queues, 3 API endpoints, 7 models
+**Version**: 6.0.0 (Phase G — Intelligence Layer: Memory + Intent + Multi-Agent Reasoning)  
+**Last Updated**: March 20, 2026  
+**Status**: ✅ Fully Operational — 14 workers, 14 queues, 3 API endpoints, 9 models
 
 ---
 
@@ -38,9 +38,11 @@ The AI Session Assistant is an event-driven, microservices-style pipeline that p
 
 | Principle | Implementation |
 |---|---|
-| **Parallel processing** | Two independent pipelines (early window + full transcript) feed the same analysis queue |
+| **Parallel processing** | Two independent pipelines (early window + full transcript) feed the same LLM queue |
+| **Direct LLM dispatch** | `segmentGrouperWorker` writes directly to `llm-calls` via `Promise.all` — zero intermediate hops on the hot path |
 | **Non-blocking workers** | Worker threads never stall — no polling loops; `blockAggregatorWorker` owns block-completion logic; `llmWorker` is a safety-net only |
 | **Parallel enqueuing** | `segmentGrouperWorker` dispatches all segments via `Promise.all` — no serial Redis round-trips |
+| **Enrichment buffer** | `analysisWorker` (concurrency 10) handles overflow, re-dispatch, and future pre-LLM enrichment without blocking the hot path |
 | **Rate-limit resilience** | LLM calls routed through a rate-limited BullMQ queue; Groq → Gemini automatic fallback |
 | **Idempotency** | All BullMQ jobs use deterministic `jobId` to prevent duplicate processing on retry |
 | **Hierarchical dedup** | Every 8 segments → 1 Block → Final session intelligence (80–90% fewer LLM calls) |
@@ -48,6 +50,12 @@ The AI Session Assistant is an event-driven, microservices-style pipeline that p
 | **Product layer** | Session Report + Chat API on top of raw intelligence |
 | **RAG retrieval** | Chat uses semantic vector search + topic boosting instead of flat report lookup |
 | **Cloud transcript storage** | All transcript chunks stored in MinIO — no local filesystem dependency |
+| **Cross-session memory** | `UserMemory` accumulates topics + insights per user across all sessions |
+| **Intent-aware retrieval** | Query intent classified → query rewritten → ANN search on semantically enriched query |
+| **Personalized vectors** | Query embedding nudged toward user’s historical topic profile (α=0.12) |
+| **Intelligence depth ranking** | Retrieved blocks re-ranked by decisions×3 + insights×2 + action_items×2 |
+| **Multi-agent reasoning** | Agent 1 (Analyst) pre-reasons over context; Agent 2 (Answerer) builds answer from structured intelligence |
+| **Self-learning feedback** | Every answer auto-rated 1–5 by LLM; signal stored in `RetrievalFeedback` for future RL |
 
 ---
 
@@ -117,7 +125,7 @@ windowDiarizationWorker
   → speaker segments with string IDs (e.g. "session_X-window-0-3-0")
   → cleanerQueue (transcript-cleaner)
     → grouperQueue (segment-grouper)
-      → analysisQueue → llm-calls queue
+      → llm-calls queue  [direct — no analysisWorker hop]
         → SegmentAnalysis stored (Mixed segmentId: String)
 ```
 
@@ -126,7 +134,7 @@ windowDiarizationWorker
 ```
 transcriptAggregatorWorker
   ├─ diarizationQueue  → speakerDiarizationWorker
-  │    → cleanerQueue → grouperQueue → analysisQueue → llm-calls
+  │    → cleanerQueue → grouperQueue → llm-calls  [direct]
   │      → SegmentAnalysis stored (segmentId: Number)
   │      → every 8 segments → blockQueue
   │          → blockAggregatorWorker → BlockAnalysis stored
@@ -136,13 +144,11 @@ transcriptAggregatorWorker
        → SessionContext stored (full-transcript AI summary)
 ```
 
-### Convergence — Both Paths Feed Same Analysis
+### Convergence — Both Paths Feed llm-calls Directly
 
 ```
-analysisQueue (from Path A or B)
-    ↓
-analysisWorker (dispatcher, concurrency 5)
-    ↓ jobId: llm-{mediaId}-{segmentId}
+segmentGrouperWorker (Promise.all)
+    ↓ jobId: llm-{mediaId}-{segmentId}  [direct enqueue — zero intermediate hops]
 llm-calls queue
     ↓
 llmWorker (concurrency 2, rate-limited 20/60s)
@@ -165,6 +171,13 @@ insightAggregatorWorker
     → SESSION_INTELLIGENCE_READY (Kafka)
     → reportQueue job added
     → TranscriptBufferService.cleanup(mediaId)
+
+[Side channel — NOT on the hot path]
+analysisQueue → analysisWorker (enrichment buffer, concurrency 10)
+    • overflow, manual re-dispatch, operational tooling
+    • future pre-LLM enrichment (context injection, A/B routing)
+    ↓ jobId: llm-{mediaId}-{segmentId}  [BullMQ deduplicates if already queued]
+llm-calls queue
 ```
 
 ### Phase E — Product Layer
@@ -178,33 +191,44 @@ Frontend: GET /api/report/:mediaId
     → shows report + suggestedQuestions
 ```
 
-### Phase F — RAG: Intelligent Memory Retrieval
+### Phase F — RAG: Multi-Layer Intelligent Memory Retrieval
 
 ```
-                         blockAggregatorWorker
-                               ↓
-                   embeddingQueue ("embed-block" job)
-                               ↓
-                   embeddingWorker
-                     • BlockAnalysis.findOne()
-                     • embed(summary + insights)   → 384-dim vector
-                     • insertVector()               → Qdrant (uuid v5 point ID)
+blockAggregatorWorker (after each block is stored)
+     │
+     ├─ embeddingQueue ("embed-block" job)  → embeddingWorker
+     │     • BlockAnalysis.findOne()
+     │     • embed(summary + topics + insights + decisions + action_items)
+     │     • insertVectorToCollection("session_blocks", ...)  → Qdrant
+     │
+     └─ embeddingQueue ("embed-segment" job) × 8 segments  → embeddingWorker
+           • SegmentAnalysis.findOne()  [only numeric segmentIds — Path B only]
+           • embed(summary + topics + insights + action_items)
+           • insertVectorToCollection("session_segments", ...)  → Qdrant
 
 User asks question → POST /api/chat
     → chatQueue job
-    → chatWorker (Phase F)
-        1. retrieve(mediaId, question)
-             • embed(question) → queryVector
-             • searchVector()  → top-10 Qdrant candidates
-             • topic boost (+0.1 if query keywords ∩ block topics)
-             • re-rank + slice top 3
-        2. buildContext(mediaId, retrievedBlocks)
-             • SessionContext.findOne()        → global summary + topics
-             • BlockAnalysis.findOne() × N    → block detail (parallel)
-             • format: [Block N] mm:ss–mm:ss / Summary / Insights / Topics / Decisions
-        3. structured prompt → AIAnalysisService.groqChat()
-        4. returns { answer, retrievedBlocks }
+    → chatWorker (Phase F — 3-layer RAG)
+        1. retrieve(mediaId, question, topKBlocks=3, topKSegments=3)
+             • ONE embed(question) → queryVector (shared across both searches)
+             • PARALLEL:
+                 searchVectorInCollection("session_blocks",   queryVector, mediaId, 5)
+                 searchVectorInCollection("session_segments", queryVector, mediaId, 5)
+             • topic boost (+0.1) applied to both result sets independently
+             • redundancy dampening (−0.05) for segments whose blockId
+               is already in the top-K blocks (reduces noise)
+             • returns { blocks: top-3, segments: top-3 }
+
+        2. buildContext(mediaId, { blocks, segments })
+             [Layer 1] SessionContext.findOne()       → Session Overview (global anchor)
+             [Layer 2] BlockAnalysis.findOne() × N    → Discussion Blocks (parallel)
+             [Layer 3] SegmentAnalysis.findOne() × M  → Segment Details  (parallel)
+             • format: labelled sections with time ranges, summaries, insights
+
+        3. 3-layer-aware prompt → AIAnalysisService.groqChat()
+        4. returns { answer, retrievedBlocks: N, retrievedSegments: M }
 ```
+
 
 ---
 
@@ -312,7 +336,7 @@ transcriptCleanerWorker  [queue: transcript-cleaner]
   else:            emit CLEAN_TRANSCRIPT_READY  →  grouperQueue (jobId: group-${mediaId})
 ```
 
-### Step 6 — Segment Grouping [both paths]
+### Step 6 — Segment Grouping + Direct LLM Dispatch [both paths]
 
 ```
 segmentGrouperWorker  [queue: segment-grouper]
@@ -326,22 +350,25 @@ segmentGrouperWorker  [queue: segment-grouper]
   else:
     emit WINDOW_GROUPED_READY (Kafka)
   
-  // All segments enqueued in parallel — no serial await per segment
+  // All segments enqueued DIRECTLY into llm-calls in parallel — zero intermediate hops.
+  // BullMQ deduplicates via jobId if the same segment arrives via analysisWorker too.
   await Promise.all(validGroups.map((group, i) => {
     segmentId = group.segmentId ?? i   (string for window, number for full)
-    return analysisQueue.add({ mediaId, windowId, segmentId, text, totalSegments },
-      { jobId: isWindowJob ? analysis-${segmentId} : analysis-${mediaId}-${i} })
+    return llmQueue.add("segment-analysis",
+      { mediaId, userId, windowId, segmentId, text, totalSegments },
+      { jobId: llm-${mediaId}-${segmentId} })   ← same jobId as llmWorker idempotency key
   }))
 ```
 
-### Step 7 — Analysis Dispatch
+### Step 7 — Enrichment Buffer (side channel only)
 
 ```
-analysisWorker  [queue: analysisQueue, concurrency: 5]
+analysisWorker  [queue: analysisQueue, concurrency: 10]  ← NOT on the hot path
+  Handles: overflow, manual re-dispatch, operational tooling, future pre-LLM enrichment.
   // windowId forwarded so window-based jobs carry context end-to-end
   llmQueue.add("segment-analysis",
-    { mediaId, windowId, segmentId, text, totalSegments },
-    { jobId: llm-${mediaId}-${segmentId} })   ← deduplication guard
+    { mediaId, userId, windowId, segmentId, text, totalSegments },
+    { jobId: llm-${mediaId}-${segmentId} })   ← BullMQ deduplicates if already queued
   emit SEGMENT_DISPATCHED (Kafka, includes windowId)
 ```
 
@@ -562,7 +589,7 @@ Ask the AI assistant a question about a completed session.
 | 4 | `speakerDiarizationWorker.js` | `speaker-diarization` | `🎙️ Speaker Diarization Worker Started` | default | ✅ | `SPEAKERS_READY` |
 | 5 | `transcriptCleanerWorker.js` | `transcript-cleaner` | `🧹 Transcript Cleaner Worker Started` | default | ❌ | `WINDOW_CLEAN_READY` or `CLEAN_TRANSCRIPT_READY` |
 | 6 | `segmentGrouperWorker.js` | `segment-grouper` | `📊 Segment Grouper Worker Started` | default | ✅ | `WINDOW_GROUPED_READY` or `GROUPED_SEGMENTS_READY` |
-| 7 | `analysisWorker.js` | `analysisQueue` | `🤖 Analysis Dispatcher Worker started` | 5 | ❌ | `SEGMENT_DISPATCHED` |
+| 7 | `analysisWorker.js` | `analysisQueue` | `🤖 Analysis Buffer Worker started` | 10 | ❌ | `SEGMENT_DISPATCHED` |
 | 8 | `llmWorker.js` | `llm-calls` | `🧠 LLM Router Worker started` | 2 (rate: 20/60s) | ✅ | `SEGMENT_ANALYSIS_READY` |
 | 9 | `blockAggregatorWorker.js` | `block-aggregation` | `🧱 Block Aggregator Worker started` | 3 | ✅ | `BLOCK_ANALYSIS_READY` |
 | 10 | `insightAggregatorWorker.js` | `insight-aggregation` | `📊 Insight Aggregator Worker Started` | default | ✅ | `SESSION_INTELLIGENCE_READY` |
@@ -677,8 +704,8 @@ After completion:
 | Window grouping | `group-${windowId}` | One group per window |
 | Full transcript grouping | `group-${mediaId}` | One group per session |
 | Global context | `context-${mediaId}` | One global context per session |
-| LLM segment | `llm-${mediaId}-${segmentId}` | One LLM call per segment |
-| Analysis dispatch | `analysis-${mediaId}-${i}` or `analysis-${segmentId}` | No duplicate dispatches |
+| LLM segment | `llm-${mediaId}-${segmentId}` | One LLM call per segment — used by **both** `segmentGrouperWorker` (hot path) and `analysisWorker` (buffer); BullMQ deduplicates |
+| Analysis buffer re-dispatch | `llm-${mediaId}-${segmentId}` | Same key — safe multi-producer by design |
 | Block aggregation | `block-${mediaId}-${blockId}` | One block job per blockId |
 | Final aggregation | `final-aggregate-${mediaId}` | **Same in both llmWorker and blockAggregatorWorker** |
 | Report generation | `create-session-report-${mediaId}` | One report per session |
@@ -773,6 +800,35 @@ Human-readable formatted report. Generated by `reportGeneratorWorker` after inte
 {
   title:     String,
   createdAt: Date
+}
+```
+
+### UserMemory ★ Phase G
+One document per user. Accumulates topics and insights across all sessions.
+```javascript
+{
+  userId:       String,  // indexed, unique
+  topics:       [String], // max 200 (Set-deduped across sessions)
+  insights:     [String], // max 200 (Set-deduped across sessions)
+  sessionCount: Number,   // running count of sessions processed
+  lastUpdated:  Date,
+  createdAt:    Date,
+  updatedAt:    Date
+}
+```
+
+### RetrievalFeedback ★ Phase G
+Stores auto-LLM-rated answer quality for self-learning retrieval.
+```javascript
+{
+  userId:            String,   // indexed
+  mediaId:           String,   // indexed
+  query:             String,   // rewritten query sent to retrieval
+  intent:            String,   // enum: summary|deep_explanation|decision|action_items|question_answer|trend
+  retrievedBlockIds: [Number], // blockIds that were retrieved for this answer
+  rating:            Number,   // 1–5 (auto-scored by LLM)
+  answer:            String,   // first 1000 chars of the answer
+  createdAt:         Date      // indexed
 }
 ```
 
@@ -889,25 +945,81 @@ async emit(event, payload)
   fails silently (pipeline continues if Kafka is down)
 ```
 
-### retrieverService (`src/services/retrieverService.js`) [Phase F]
+### retrieverService (`src/services/retrieverService.js`) [Phase F+G]
 
 ```javascript
-async retrieve(mediaId, query, topK = 3)
+async retrieve(mediaId, query, topKBlocks=3, topKSegments=3, userId=null, userMemory=null)
   // 1. embed(query) → queryVector
-  // 2. searchVector(queryVector, mediaId) → up to 10 Qdrant candidates
-  // 3. Topic boost: score += 0.1 if block.topics ∩ query keywords
-  // 4. sort desc by boosted score → slice(0, topK)
-  → [{ score, mediaId, blockId, topics, ... }]
+  // 2. Vector nudging (Phase G): if userMemory.topics.length >= 3:
+  //      profileVector = embed(userMemory.topics.join(" "))
+  //      queryVector = queryVector×0.88 + profileVector×0.12
+  // 3. PARALLEL: searchVectorInCollection(BLOCK_COLLECTION, queryVector, mediaId, 5)
+  //              searchVectorInCollection(SEGMENT_COLLECTION, queryVector, mediaId, 5)
+  // 4. Topic boost: score += 0.1 if block.topics ∩ query keywords
+  // 5. Intelligence depth ranking (Phase G):
+  //      rankScore = ANN×10 + decisions×3 + insights×2 + action_items×2
+  //      → sort desc → slice(0, topKBlocks)
+  // 6. Segment redundancy dampening (−0.05)
+  → { blocks: top-K ranked, segments: top-K }
 ```
 
-### contextBuilder (`src/services/contextBuilder.js`) [Phase F]
+### contextBuilder (`src/services/contextBuilder.js`) [Phase F+G]
 
 ```javascript
-async buildContext(mediaId, retrievedBlocks)
-  // 1. SessionContext.findOne({ mediaId }) → global session summary
-  // 2. BlockAnalysis.findOne() × N in parallel (.lean())
-  // 3. Format: time range (mm:ss), summary, insights, decisions, action items
-  → "Session Overview:\n...\nRelevant Discussions:\n[Block 1] 00:00–02:30\n..."
+async buildContext(mediaId, retrieved, userId=null, intent=null)
+  // 0. [Phase G] USER INTENT header — intent description
+  // 1. [Phase G] UserMemory.findOne({ userId }) → User Profile section
+  //      recurring topics (top 10) + past insights (top 5)
+  // 2. SessionContext.findOne({ mediaId }) → Session Overview
+  // 3. BlockAnalysis.findOne() × N in parallel (.lean())
+  //      format: time range (mm:ss), summary, insights, topics, decisions, action items
+  // 4. SegmentAnalysis.findOne() × M in parallel
+  → "=== User Intent ===\n...\n=== Your Profile ===\n...\n=== Session Overview ===\n..."
+```
+
+### intentService (`src/services/intentService.js`) [Phase G — NEW]
+
+```javascript
+async detectIntent(query)
+  // LLM call (temp 0.1) → classifies into one of 6 intent labels
+  // Fails silently → defaults to "question_answer"
+  → "summary" | "deep_explanation" | "decision" |
+     "action_items" | "question_answer" | "trend"
+
+async rewriteQuery(query, intent, userMemory=null)
+  // LLM call (temp 0.2) → expands and enriches query
+  // Injects intent framing + userMemory.topics (top 5) if relevant
+  // Fails silently → returns original query
+  → String (enriched query for ANN retrieval)
+```
+
+### memoryService (`src/services/memoryService.js`) [Phase G — NEW]
+
+```javascript
+async updateMemory(userId, intelligence)
+  // UserMemory.findOne({ userId }) or create new
+  // topics  = [...new Set([...existing, ...new])].slice(0, 200)
+  // insights = [...new Set([...existing, ...new])].slice(0, 200)
+  // sessionCount++
+  // Fails silently — never crashes insightAggregatorWorker
+```
+
+### retrievalOptimizer (`src/services/retrievalOptimizer.js`) [Phase G — NEW]
+
+```javascript
+scoreBlock(block)
+  → decisions×3 + insights×2 + action_items×2
+
+rankBlocks(blocks, topK=3)
+  → sorted by (ANN×10 + scoreBlock) desc → slice(0, topK)
+
+buildRetrievalHint(intent)
+  → { boostField: "decisions" | "insights" | "action_items" | "topics" | null }
+
+async captureFeedback({ userId, mediaId, query, intent, retrievedBlocks, answer })
+  // 1. autoRate(question, answer, intent) → LLM scores 1–5
+  // 2. RetrievalFeedback.create({ rating, intent, blockIds, answer[0:1000] })
+  // Always async, never awaited by chatWorker
 ```
 
 ### vectorService (`src/services/vectorService.js`) [Phase F]
@@ -1239,7 +1351,38 @@ New components:
 - `chatRoutes` (`GET /api/report/:mediaId` + `POST /api/chat`)
 - `chatRoutes` registered in `server.js`
 
-### Phase F — RAG: Intelligent Memory Retrieval ✅ (March 18, 2026)
+### Phase G — Intelligence Layer: Adaptive AI Chat ✅ (March 20, 2026)
+
+This phase evolves the system from **smart RAG** to **adaptive intelligence**. The chat pipeline now has 7 sequential steps, powered by 3 new services, 2 new models, and multi-agent LLM reasoning.
+
+**New files:**
+
+| File | Purpose |
+|---|---|
+| `src/models/UserMemory.js` | Cross-session memory store per user |
+| `src/models/RetrievalFeedback.js` | Self-learning feedback signal per query |
+| `src/services/memoryService.js` | Merges session intelligence into UserMemory |
+| `src/services/intentService.js` | Intent classification + query rewriting |
+| `src/services/retrievalOptimizer.js` | Block depth scoring, ranking, feedback capture |
+
+**Modified files:**
+
+| File | Change |
+|---|---|
+| `workers/insightAggregatorWorker.js` | Calls `updateMemory()` after every `SESSION_INTELLIGENCE_READY` |
+| `src/services/contextBuilder.js` | Added User Intent (Layer 0) + User Memory (Layer 1) to context |
+| `src/services/retrieverService.js` | Added vector nudging + intelligence depth ranking |
+| `workers/chatWorker.js` | Full 7-step pipeline: load memory → intent → rewrite → retrieve → context → agent1 → agent2 → feedback |
+
+**Capabilities added:**
+- Cross-session memory (UserMemory accumulates per user)
+- Intent-aware retrieval (6 intent classes)
+- Semantic query rewriting with user profile injection
+- Personalized vector nudging (α=0.12 profile blend)
+- Intelligence depth ranking (decisions×3 + insights×2 + actions×2)
+- Multi-agent reasoning (Analyst → Answerer two-step LLM chain)
+- Intent-specific answer instructions (6 different output formats)
+- Self-learning auto-rating + RetrievalFeedback storage
 
 5 bugs found and fixed across the pipeline before Phase F work began:
 
@@ -1285,6 +1428,10 @@ New components:
 | Chat returns "No relevant context" | Qdrant not running or no blocks embedded yet | Start Qdrant: `docker run -p 6333:6333 qdrant/qdrant` |
 | Transcript chunks not found (merge error) | MinIO not running or bucket missing | Start MinIO; `TranscriptService` auto-creates bucket on import |
 | Qdrant `Bad Request` on upsert | Point ID is not UUID or integer | Fixed — `vectorService.js` now uses `uuid v5` `toPointId()` |
+| Chat answers feel shallow (Phase G) | `userId` not passed in chat request body | Add `userId` field to POST `/api/chat` JSON body |
+| UserMemory not created after session | `userId` missing from upload job data | Ensure `userId` is included when enqueuing `insight-aggregation` job |
+| Intent detection returns `unknown` | LLM returned unexpected label | Graceful fallback to `question_answer` — check Groq API key |
+| chatWorker slow (>15s) | Both agent LLM calls rate-limited simultaneously | Same Groq rate limit applies — add delay or switch agent2 to Gemini |
 
 ---
 
@@ -1294,15 +1441,16 @@ New components:
 |---|---|
 | Total workers | 14 |
 | Total BullMQ queues | 14 |
-| Total MongoDB models | 7 |
+| Total MongoDB models | 9 |
 | Total API endpoints | 3 (upload, report, chat) |
 | Kafka events | 16 |
 | LLM calls saved vs naïve | 85–95% (blocks + dedup optimizations) |
 | Time to first insight | ~120 seconds (Path A window) |
 | Time to complete insight | Session length + ~2 min processing |
-| Chat response time | < 5s typical |
-| Chat context source | Top-3 blocks via Qdrant ANN search + topic boost |
-| Workers requiring MongoDB | 9 of 14 |
+| Chat LLM calls per query | 4 (intent detect + query rewrite + agent1 + agent2) |
+| Chat response time | < 10s typical (2 agent calls) |
+| Chat context layers | 5 (intent + memory + session + blocks + segments) |
+| Workers requiring MongoDB | 10 of 14 |
 | Workers requiring Qdrant | 2 of 14 (embeddingWorker, chatWorker) |
 | Transcript storage | MinIO bucket `transcripts` (no local disk) |
 | All workers syntax checked | ✅ 14/14 (node --check, March 18 2026) |

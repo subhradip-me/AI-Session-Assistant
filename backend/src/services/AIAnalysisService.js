@@ -425,6 +425,101 @@ Return JSON in this exact format (no markdown, no explanation):
     }
   }
 
+
+  /**
+   * Generate a rich, structured markdown session report from session intelligence.
+   *
+   * The LLM groups raw topics / insights / decisions / action_items into
+   * coherent thematic sections, writes short descriptive bullets under each
+   * heading, and wraps everything in standard markdown so the frontend can
+   * render it directly.
+   *
+   * @param {object} intelligence - { topics, insights, decisions, action_items, summaries, questions }
+   * @returns {Promise<string|null>} Markdown string, or null on parse failure.
+   */
+  async generateReport(intelligence) {
+    const {
+      topics        = [],
+      insights      = [],
+      decisions     = [],
+      action_items  = [],
+      summaries     = [],
+      questions     = []
+    } = intelligence;
+
+    const fmt = arr => arr.length
+      ? arr.map((x, i) => `${i + 1}. ${x}`).join("\n")
+      : "(none)";
+
+    const prompt = `
+You are an expert technical writer creating a session summary report from AI-extracted meeting intelligence.
+
+Your job is to produce a polished, structured markdown report that is **deep and informative — never shallow**.
+
+────────────────────────────────────────────────────────────────────
+RAW SESSION INTELLIGENCE
+────────────────────────────────────────────────────────────────────
+
+SESSION SUMMARIES (ordered, one per content block):
+${summaries.length ? summaries.map((s, i) => `${i + 1}. ${s}`).join("\n") : "(none)"}
+
+TOPICS COVERED:
+${fmt(topics)}
+
+INSIGHTS:
+${fmt(insights)}
+
+DECISIONS MADE:
+${fmt(decisions)}
+
+ACTION ITEMS:
+${fmt(action_items)}
+
+OPEN QUESTIONS:
+${fmt(questions)}
+
+────────────────────────────────────────────────────────────────────
+REPORT FORMATTING INSTRUCTIONS
+────────────────────────────────────────────────────────────────────
+
+1. Start with a **Session Overview** paragraph (2–4 sentences) derived from the summaries that briefly describes what this session was about. Write it in third person ("The session covered…").
+
+2. If there are ACTION ITEMS, add a note about them at the top right after the overview: "**Finding action items**: <one sentence explaining what action items exist or don't exist>."
+
+3. Group the TOPICS into 3–8 logical themed sections. For each section:
+   - Use a ### heading (e.g., "### File System Navigation Commands")
+   - List each relevant item as a markdown bullet "- **term**: description"
+   - Pull supporting detail from INSIGHTS and SUMMARIES where appropriate
+   - Be specific and informative — never just repeat the topic name as the description
+
+4. After the topic sections, add these sections only if they have content:
+   - **### Key Insights** — bullet list of non-obvious insights (skip generic ones)
+   - **### Decisions Made** — bullet list
+   - **### Action Items** — bullet list with clear owner / next step if available
+   - **### Open Questions** — bullet list
+
+5. Formatting rules:
+   - Use **bold** for key terms within bullets
+   - Use \`backticks\` for command names, code, or technical identifiers
+   - Do NOT use emoji in the output
+   - Do NOT include a title (H1/H2 heading) at the top — start directly with the Session Overview paragraph
+   - No filler phrases like "In conclusion" or "Overall"
+
+Return ONLY the markdown — no preamble, no explanation, no code fences.
+`;
+
+    try {
+      const raw = await callWithRetry(
+        () => this.groqChat(prompt, 0.3),
+        () => geminiGenerate(prompt)
+      );
+      return raw.trim();
+    } catch (err) {
+      console.warn("⚠️  generateReport LLM call failed:", err.message);
+      return null;
+    }
+  }
+
 }
 
 export default new AIAnalysisService();

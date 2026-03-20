@@ -4,6 +4,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import redis from "../src/config/redis.js";
 import SessionReport from "../src/models/SessionReport.js";
+import AIAnalysisService from "../src/services/AIAnalysisService.js";
 import connectDB from "../src/config/db.js";
 
 // Load environment variables relative to this file's location
@@ -16,55 +17,95 @@ connectDB();
 
 console.log("📄 Report Generator Worker Started");
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Static fallback formatter
+//
+// Produces a well-structured markdown report without an LLM call.
+// Used when AIAnalysisService.generateReport() throws or returns null.
+// ─────────────────────────────────────────────────────────────────────────────
+function buildStaticReport(intelligence) {
+  const {
+    topics       = [],
+    insights     = [],
+    decisions    = [],
+    action_items = [],
+    summaries    = [],
+    questions    = []
+  } = intelligence;
+
+  const bullet   = items => items.map(x => `- ${x}`).join("\n");
+  const numbered = items => items.map((x, i) => `${i + 1}. ${x}`).join("\n");
+
+  // Build a narrative overview from summaries
+  const overviewText = summaries.length
+    ? summaries.slice(0, 3).join(" ")
+    : `This session covered key discussions around ${topics.slice(0, 3).join(", ") || "various topics"}.`;
+
+  const sections = [
+    `The session covered the following topics: ${topics.slice(0, 5).join("; ") || "see below"}.`,
+    overviewText,
+    ""
+  ];
+
+  if (topics.length) {
+    sections.push("### Key Topics", numbered(topics), "");
+  }
+
+  if (insights.length) {
+    sections.push("### Key Insights", bullet(insights), "");
+  }
+
+  if (decisions.length) {
+    sections.push("### Decisions Made", bullet(decisions), "");
+  }
+
+  if (action_items.length) {
+    sections.push("### Action Items", bullet(action_items), "");
+  }
+
+  if (questions.length) {
+    sections.push("### Open Questions", bullet(questions), "");
+  }
+
+  return sections.join("\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Worker
+// ─────────────────────────────────────────────────────────────────────────────
 const worker = new Worker(
   "report-generator",
   async (job) => {
-    const { mediaId, intelligence } = job.data;
+    const { mediaId, intelligence, userId } = job.data;
 
-    const {
-      topics = [],
-      insights = [],
-      decisions = [],
-      action_items = []
-    } = intelligence;
+    console.log(`📄 Generating report for ${mediaId}...`);
 
-    const report = [
-      "📌 Session Overview",
-      `This session covered key discussions around ${topics.slice(0, 3).join(", ") || "various topics"}.`,
-      "",
-      "🧠 Key Topics",
-      topics.length
-        ? topics.map((t, i) => `${i + 1}. ${t}`).join("\n")
-        : "No specific topics identified.",
-      "",
-      "💡 Insights",
-      insights.length
-        ? insights.map((ins) => `- ${ins}`).join("\n")
-        : "No insights captured.",
-      "",
-      "✅ Decisions",
-      decisions.length
-        ? decisions.map((d) => `- ${d}`).join("\n")
-        : "No explicit decisions recorded.",
-      "",
-      "🚀 Action Items",
-      action_items.length
-        ? action_items.map((a) => `- ${a}`).join("\n")
-        : "No action items identified."
-    ].join("\n");
+    // Attempt AI-structured report first; fall back to static if it fails.
+    let content = null;
+
+    try {
+      content = await AIAnalysisService.generateReport(intelligence);
+    } catch (err) {
+      console.warn(`⚠️  AI report generation failed for ${mediaId}:`, err.message);
+    }
+
+    if (!content) {
+      console.warn(`📄 Falling back to static report formatter for ${mediaId}`);
+      content = buildStaticReport(intelligence);
+    }
 
     await SessionReport.findOneAndUpdate(
       { mediaId },
-      { mediaId, content: report, updatedAt: new Date() },
+      { mediaId, userId, content, updatedAt: new Date() },
       { upsert: true, new: true }
     );
 
-    console.log(`📄 Report generated for ${mediaId}`);
+    console.log(`📄 Report saved for ${mediaId} (${content.length} chars)`);
   },
   {
     connection: redis,
     removeOnComplete: { count: 10 },
-    removeOnFail: { count: 20 }
+    removeOnFail:     { count: 20 }
   }
 );
 

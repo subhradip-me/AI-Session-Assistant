@@ -14,22 +14,22 @@ class EventService {
     }
   }
 
-  async emitChunkCreated(chunkName, mediaId= "default-media", totalChunks = null) {
+  async emitChunkCreated(chunkName, mediaId = "default-media", totalChunks = null, userId = null) {
 
     await this.ensureProducerConnected();
 
     await producer.send({
       topic: "chunk-created",
       messages: [
-        { value: JSON.stringify({ chunk: chunkName, mediaId}) }
+        { value: JSON.stringify({ chunk: chunkName, mediaId, userId }) }
       ],
       timeout: 30000
     });
 
     console.log("Kafka CHUNK_CREATED event emitted:", chunkName);
 
-    // enqueue Redis job
-    await JobService.enqueueChunk(chunkName, mediaId, totalChunks);
+    // enqueue Redis job with userId so all downstream workers know the owner
+    await JobService.enqueueChunk(chunkName, mediaId, totalChunks, userId);
 
   }
 
