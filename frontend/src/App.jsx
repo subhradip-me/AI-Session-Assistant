@@ -1,87 +1,57 @@
 import React, { useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
-import { getMe, logout } from './slices/authSlice';
-import { setSelectedSession, fetchSessions, clearCurrentReport } from './slices/sessionSlice';
-
-// Components
-import PrivateRoute from './components/PrivateRoute';
+import { getMe } from './slices/authSlice';
 import AppLayout from './layouts/AppLayout';
-
-// Pages
+import Home from './pages/Home';
+import CalendarView from './pages/CalendarView';
+import Sessions from './pages/Sessions';
 import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
-import DashboardPage from './pages/DashboardPage';
-import SessionViewPage from './pages/SessionViewPage';
 
-const AppContent = () => {
+function ProtectedRoute({ children }) {
+  const { isAuthenticated, loading } = useSelector((s) => s.auth);
+  if (loading) {
+    return (
+      <div className="w-screen h-screen bg-[#fbfbfa] flex items-center justify-center">
+        <div className="w-8 h-8 rounded-full border-2 border-gray-200 border-t-gray-900 animate-spin-slow" />
+      </div>
+    );
+  }
+  return isAuthenticated ? children : <Navigate to="/login" replace />;
+}
+
+function AuthRoute({ children }) {
+  const { isAuthenticated } = useSelector((s) => s.auth);
+  return isAuthenticated ? <Navigate to="/" replace /> : children;
+}
+
+export default function App() {
   const dispatch = useDispatch();
-  const navigate = useNavigate();
-  const { user, isAuthenticated, token } = useSelector((state) => state.auth);
-  const { sessions, selectedSessionId } = useSelector((state) => state.session);
 
+  // Restore auth state from token on hard refresh
   useEffect(() => {
-    if (token) {
+    if (localStorage.getItem('token')) {
       dispatch(getMe());
-      dispatch(fetchSessions());
     }
-  }, [dispatch, token]);
+  }, [dispatch]);
 
-  const handleLogout = () => {
-    dispatch(logout());
-    navigate('/login');
-  };
-
-  const handleNewSession = () => {
-    dispatch(setSelectedSession(null));
-    dispatch(clearCurrentReport());   // clear stale report immediately
-    navigate('/');
-  };
-
-  const handleSelectSession = (id) => {
-    dispatch(setSelectedSession(id));
-    dispatch(clearCurrentReport());   // clear stale report so old content doesn't flash
-    navigate(`/session/${id}`);
-  };
-
-  if (isAuthenticated === undefined) return null; // Wait for auth check
-
-  return (
-    <Routes>
-      <Route path="/login" element={isAuthenticated ? <Navigate to="/" /> : <LoginPage />} />
-      <Route path="/register" element={isAuthenticated ? <Navigate to="/" /> : <RegisterPage />} />
-      
-      <Route 
-        path="/*" 
-        element={
-          <PrivateRoute>
-            <AppLayout 
-              user={user} 
-              sessions={sessions} 
-              selectedSession={selectedSessionId}
-              onSelectSession={handleSelectSession}
-              onNewSession={handleNewSession}
-              onLogout={handleLogout}
-            >
-              <Routes>
-                <Route path="/" element={<DashboardPage />} />
-                <Route path="/session/:sessionId" element={<SessionViewPage />} />
-                <Route path="*" element={<Navigate to="/" />} />
-              </Routes>
-            </AppLayout>
-          </PrivateRoute>
-        } 
-      />
-    </Routes>
-  );
-};
-
-const App = () => {
   return (
     <BrowserRouter>
-      <AppContent />
+      <Routes>
+        {/* Public auth routes */}
+        <Route path="/login"    element={<AuthRoute><LoginPage /></AuthRoute>} />
+        <Route path="/register" element={<AuthRoute><RegisterPage /></AuthRoute>} />
+
+        {/* Protected app routes */}
+        <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
+          <Route path="/"         element={<Home />} />
+          <Route path="/calendar" element={<CalendarView />} />
+          <Route path="/sessions" element={<Sessions />} />
+        </Route>
+
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
     </BrowserRouter>
   );
-};
-
-export default App;
+}

@@ -1,130 +1,186 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap');
 @import "tailwindcss";
 
 :root {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f9fafb;
+  --bg-tertiary: #f3f4f6;
+  --bg-sidebar: #fbfbfa;
+  --border-color: #ecece9;
+  --border-strong: #d1d5db;
+  --text-primary: #111827;
+  --text-body: #37352f;
+  --text-secondary: #4b5563;
+  --text-muted: #9ca3af;
+  --accent-color: #6366f1;
+  --accent-hover: #4f46e5;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   scrollbar-gutter: stable;
-}
-
-/* Custom Scrollbar (Notion Style) */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: rgba(55, 53, 47, 0.08);
-  border-radius: 20px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(55, 53, 47, 0.16);
-}
-
-/* Micro-animations */
-@keyframes fadeInScale {
-  from {
-    opacity: 0;
-    transform: scale(0.98);
-  }
-  to {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-.animate-fade-in-scale {
-  animation: fadeInScale 0.2s ease-out forwards;
-}
-
-/* Transition utility for smooth hover states */
-.transition-notion {
-  transition: all 120ms ease-in-out;
-}
-
-/* Base resets or specific tweaks */
-body {
-  margin: 0;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* ── Report body typography (ChatGPT-style) ────────────────────────────────── */
+h1, h2, h3, h4, .font-heading {
+  font-family: 'Outfit', sans-serif;
+}
+
+/* ─── Custom Scrollbar ─────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.custom-scrollbar::-webkit-scrollbar { width: 4px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.07);
+  border-radius: 10px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.15);
+}
+
+/* ─── Glassmorphism Utilities ─────────────────────────────────────── */
+.glass {
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+
+.glass-dark {
+  background: rgba(15, 23, 42, 0.8);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* ─── Animations ──────────────────────────────────────────────────── */
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.5; transform: scale(0.8); }
+}
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes countUp {
+  from { transform: translateY(8px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+
+.animate-slide-in    { animation: slideIn 0.3s ease-out forwards; }
+.animate-slide-in-right { animation: slideInRight 0.25s ease-out forwards; }
+.animate-fade-in     { animation: fadeIn 0.25s ease-out forwards; }
+.animate-scale-in    { animation: scaleIn 0.2s ease-out forwards; }
+.animate-pulse-dot   { animation: pulse-dot 1.4s ease-in-out infinite; }
+.animate-spin-slow   { animation: spin-slow 2s linear infinite; }
+.animate-count-up    { animation: countUp 0.4s ease-out forwards; }
+
+/* ─── Report Body Typography ──────────────────────────────────────── */
 .report-body {
-  color: #374151;          /* gray-700 — warm readable dark */
-  font-size: 16px;
+  color: var(--text-secondary);
+  font-size: 0.9375rem;
   line-height: 1.75;
-  font-family: 'Inter', system-ui, sans-serif;
 }
-
-.report-body .md-h1 {
-  font-size: 1.75rem;      /* 28px */
+.report-body h1 {
+  font-size: 1.625rem;
   font-weight: 700;
-  color: #111827;          /* near-black */
-  margin: 2rem 0 0.75rem;
-  letter-spacing: -0.02em;
-  line-height: 1.3;
+  color: var(--text-primary);
+  margin: 1.75rem 0 0.75rem;
+  letter-spacing: -0.025em;
+  font-family: 'Outfit', sans-serif;
 }
-
-.report-body .md-h2 {
-  font-size: 1.25rem;      /* 20px */
-  font-weight: 650;
-  color: #1f2937;
-  margin: 1.75rem 0 0.5rem;
-  letter-spacing: -0.01em;
-  line-height: 1.35;
-}
-
-.report-body .md-h3 {
-  font-size: 1rem;         /* 16px */
+.report-body h2 {
+  font-size: 1.25rem;
   font-weight: 600;
-  color: #374151;
-  margin: 1.25rem 0 0.25rem;
-  text-transform: none;    /* override any uppercase that was there before */
-  letter-spacing: 0;
+  color: var(--text-primary);
+  margin: 1.5rem 0 0.625rem;
+  letter-spacing: -0.015em;
+  font-family: 'Outfit', sans-serif;
 }
-
-.report-body .md-p {
-  margin: 0.35rem 0;
-  color: #374151;
+.report-body h3 {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 1.25rem 0 0.5rem;
+  font-family: 'Outfit', sans-serif;
 }
-
-.report-body .md-spacer {
-  height: 0.75rem;
-}
-
-.report-body .md-ul {
-  list-style: none;
-  margin: 0.5rem 0 0.75rem;
-  padding: 0;
-}
-
-.report-body .md-li {
-  position: relative;
-  padding-left: 1.25rem;
-  margin: 0.3rem 0;
-  color: #374151;
-}
-
-.report-body .md-li::before {
-  content: '•';
+.report-body p  { margin-bottom: 0.875rem; }
+.report-body ul { list-style: none; padding-left: 1.25rem; margin-bottom: 1rem; }
+.report-body li { position: relative; margin-bottom: 0.5rem; }
+.report-body li::before {
+  content: '→';
   position: absolute;
-  left: 0;
-  color: #9ca3af;           /* muted gray bullet */
-  font-size: 1.1em;
-  line-height: 1.7;
-}
-
-.report-body strong {
+  left: -1.125rem;
+  color: var(--accent-color);
   font-weight: 600;
-  color: #111827;
+  font-size: 0.875rem;
+}
+.report-body strong { font-weight: 600; color: var(--text-primary); }
+.report-body em     { font-style: italic; color: var(--text-secondary); }
+.report-body code {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.8125em;
+  background: #f3f4f6;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 0.1em 0.4em;
+  color: #374151;
 }
 
-.report-body em {
-  font-style: italic;
-  color: #4b5563;
+/* ─── Pipeline Steps ──────────────────────────────────────────────── */
+.step-idle      { color: var(--text-muted); }
+.step-running   { color: var(--accent-color); }
+.step-done      { color: var(--success); }
+.step-failed    { color: var(--danger); }
+
+/* ─── Status Badges ───────────────────────────────────────────────── */
+.badge-uploading   { background: #eff6ff; color: #3b82f6; border: 1px solid #bfdbfe; }
+.badge-processing  { background: #faf5ff; color: #8b5cf6; border: 1px solid #ddd6fe; }
+.badge-complete    { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
+.badge-failed      { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+.badge-queued      { background: #fffbeb; color: #d97706; border: 1px solid #fde68a; }
+
+/* ─── Focus Styles ────────────────────────────────────────────────── */
+*:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ─── Drag-Drop Zone ──────────────────────────────────────────────── */
+.drop-zone-active {
+  border-color: var(--accent-color) !important;
+  background: rgba(99, 102, 241, 0.04) !important;
 }

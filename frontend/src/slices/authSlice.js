@@ -1,7 +1,7 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import axios from 'axios';
 
-const API_BASE_URL = 'http://localhost:5000/api';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
 // Thunks
 export const register = createAsyncThunk(
@@ -32,7 +32,7 @@ export const login = createAsyncThunk(
 
 export const getMe = createAsyncThunk(
   'auth/getMe',
-  async (_, { getState, rejectWithValue }) => {
+  async (_, { rejectWithValue }) => {
     try {
       const token = localStorage.getItem('token');
       if (!token) return rejectWithValue('No token found');
