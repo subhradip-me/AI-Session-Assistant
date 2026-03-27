@@ -10,6 +10,7 @@ import EventService from "../src/services/EventService.js";
 import { insightAggregationQueue } from "../src/queues/insightAggregationQueue.js";
 import { embeddingQueue } from "../src/queues/embeddingQueue.js";
 import connectDB from "../src/config/db.js";
+import { updatePipelineState, publishPipelineEvent, logJobAudit, markSessionFailed } from "../src/utils/workerObservability.js";
 
 // Load environment variables
 const __filename = fileURLToPath(import.meta.url);
@@ -128,6 +129,14 @@ const worker = new Worker(
     // ── 8. Check if all blocks are complete ──────────────────────────────
     const completedBlocks = await BlockAnalysis.countDocuments({ mediaId });
 
+    await updatePipelineState(mediaId, {
+      "steps.blocks.completedBlocks": completedBlocks,
+      "steps.blocks.totalBlocks":     totalBlocks,
+      "steps.blocks.status":          completedBlocks >= totalBlocks ? "completed" : "running",
+      "steps.analysis.status":        "completed"
+    });
+    await publishPipelineEvent(mediaId, "blocks", completedBlocks >= totalBlocks ? "completed" : "running", { completedBlocks, totalBlocks });
+
     if (completedBlocks >= totalBlocks) {
       console.log(`✅ All ${totalBlocks} blocks analyzed for ${mediaId} — triggering final aggregation`);
 
@@ -189,6 +198,10 @@ worker.on("completed", (job) => {
   console.log(`Block aggregation job ${job.id} completed`);
 });
 
-worker.on("failed", (job, err) => {
+worker.on("failed", async (job, err) => {
   console.error(`❌ Block aggregation job ${job?.id} failed:`, err.message);
+  const { mediaId } = job?.data || {};
+  if (mediaId) {
+    await markSessionFailed(mediaId, "blocks", job.id, err);
+  }
 });

@@ -2,6 +2,7 @@ import express from "express";
 import { QueueEvents } from "bullmq";
 import { chatQueue } from "../queues/chatQueue.js";
 import Session from "../models/Session.js";
+import SessionState from "../models/SessionState.js";
 import SessionReport from "../models/SessionReport.js";
 import redis from "../config/redis.js";
 import { authenticate } from "../middleware/auth.js";
@@ -88,14 +89,48 @@ router.get("/report/:mediaId", authenticate, async (req, res) => {
  * GET /api/sessions
  * Protected — requires: Authorization: Bearer <token>
  *
- * Returns a list of all sessions belonging to the user,
- * sorted by most recent first.
+ * Returns sessions for the user enriched with pipeline status from SessionState.
+ * Falls back to checking SessionReport when no SessionState exists (legacy sessions).
  */
 router.get("/sessions", authenticate, async (req, res) => {
   try {
     const userId = req.user.userId;
-    const sessions = await Session.find({ userId }).sort({ createdAt: -1 });
-    res.json(sessions);
+    const sessions = await Session.find({ userId }).sort({ createdAt: -1 }).lean();
+
+    if (sessions.length === 0) return res.json([]);
+
+    const mediaIds = sessions.map((s) => s.mediaId);
+
+    // Fetch SessionState and SessionReport in parallel for all sessions
+    const [states, reports] = await Promise.all([
+      SessionState.find({ mediaId: { $in: mediaIds } }).lean(),
+      SessionReport.find({ mediaId: { $in: mediaIds } }, { mediaId: 1 }).lean()
+    ]);
+
+    const stateMap  = Object.fromEntries(states.map((s) => [s.mediaId, s]));
+    const reportSet = new Set(reports.map((r) => r.mediaId));
+
+    const enriched = sessions.map((s) => {
+      const state = stateMap[s.mediaId];
+      let status = state?.status || null;
+
+      // Legacy session: no SessionState but has a report → it's completed
+      if (!status && reportSet.has(s.mediaId)) {
+        status = "completed";
+      }
+
+      return {
+        ...s,
+        mediaId:          s.mediaId,
+        originalFilename: s.title || "Untitled Session",
+        status:           status || "queued",
+        progress:         state?.progress || (status === "completed" ? 100 : 0),
+        createdAt:        s.createdAt,
+        updatedAt:        s.updatedAt
+      };
+    });
+
+    res.json(enriched);
   } catch (err) {
     console.error("❌ Sessions list error:", err.message);
     res.status(500).json({ error: "Failed to fetch sessions", details: err.message });

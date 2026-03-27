@@ -1,10 +1,13 @@
 import { Worker } from "bullmq";
+import redis from "../src/config/redis.js";
 import TranscriptService from "../src/services/TranscriptService.js";
 import EventService from "../src/services/EventService.js";
 import diarizationQueue from "../src/queues/diarizationQueue.js";
 import globalContextQueue from "../src/queues/globalContextQueue.js";
+import connectDB from "../src/config/db.js";
+import { updatePipelineState, publishPipelineEvent, logJobAudit, markSessionFailed } from "../src/utils/workerObservability.js";
 
-
+connectDB();
 console.log("📦 Transcript Aggregator Started");
 
 const worker = new Worker(
@@ -13,6 +16,8 @@ const worker = new Worker(
 
         const { mediaId, userId } = job.data;
 
+        await updatePipelineState(mediaId, { "steps.transcription.status": "completed" });
+        await publishPipelineEvent(mediaId, "transcription", "completed");
         console.log("Aggregating transcript for:", mediaId);
 
         const transcript = await TranscriptService.merge(mediaId);
@@ -45,13 +50,11 @@ const worker = new Worker(
         );
 
         console.log(`Enqueued diarization + global context jobs for ${mediaId}`);
-
+        await updatePipelineState(mediaId, { "steps.diarization.status": "running" }, "diarizing");
+        await publishPipelineEvent(mediaId, "diarization", "running");
     },
     {
-        connection: {
-            host: "127.0.0.1",
-            port: 6379
-        }
+        connection: redis
     }
 );
 
@@ -59,6 +62,10 @@ worker.on("completed", job => {
     console.log(`Aggregation job ${job.id} completed`);
 });
 
-worker.on("failed", (job, err) => {
+worker.on("failed", async (job, err) => {
     console.error(`Aggregation job ${job.id} failed`, err);
+    const { mediaId } = job?.data || {};
+    if (mediaId) {
+        await markSessionFailed(mediaId, "transcription", job.id, err);
+    }
 });

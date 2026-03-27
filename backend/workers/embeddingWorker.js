@@ -13,6 +13,7 @@ import {
 import BlockAnalysis from "../src/models/BlockAnalysis.js";
 import SegmentAnalysis from "../src/models/SegmentAnalysis.js";
 import connectDB from "../src/config/db.js";
+import { updatePipelineState, publishPipelineEvent, logJobAudit, markSessionFailed } from "../src/utils/workerObservability.js";
 
 // Load environment variables
 const __filename = fileURLToPath(import.meta.url);
@@ -146,6 +147,9 @@ const worker = new Worker(
   async (job) => {
     const { mediaId, blockId, segmentId, type = "block", userId } = job.data;
 
+    await updatePipelineState(mediaId, { "steps.embedding.status": "running" });
+    await publishPipelineEvent(mediaId, "embedding", "running");
+
     if (type === "segment") {
       await embedSegment(mediaId, segmentId, blockId, userId);
     } else {
@@ -155,10 +159,20 @@ const worker = new Worker(
   { connection: redis }
 );
 
-worker.on("completed", (job) => {
+worker.on("completed", async (job) => {
   console.log(`Embedding job ${job.id} completed`);
+  // If no more embedding jobs for this session, mark embedding step completed
+  const { mediaId } = job.data || {};
+  if (mediaId) {
+    await updatePipelineState(mediaId, { "steps.embedding.status": "completed" });
+    await publishPipelineEvent(mediaId, "embedding", "completed");
+  }
 });
 
-worker.on("failed", (job, err) => {
+worker.on("failed", async (job, err) => {
   console.error(`❌ Embedding job ${job?.id} failed:`, err.message);
+  const { mediaId } = job?.data || {};
+  if (mediaId) {
+    await markSessionFailed(mediaId, "embedding", job.id, err);
+  }
 });

@@ -45,13 +45,22 @@ export const fetchSessions = createAsyncThunk(
   async (_, { getState, rejectWithValue }) => {
     try {
       const { auth } = getState();
-      // Assuming GET /api/sessions exists and is isolated by userId on backend
       const response = await axios.get(`${API_BASE_URL}/sessions`, {
         headers: { 'Authorization': `Bearer ${auth.token}` }
       });
-      return response.data;
+      // The enriched sessions endpoint returns a plain array with status included.
+      // Handle both old plain-array format and the sessionRoutes paginated format.
+      const data = response.data;
+      const rawSessions = Array.isArray(data) ? data : (data.sessions || []);
+      return rawSessions.map((s) => ({
+        ...s,
+        mediaId:          s.mediaId || s._id,
+        originalFilename: s.originalFilename || s.title || 'Untitled Session',
+        // Preserve status from backend — avoids unnecessary /status polling
+        status: s.status || null,
+      }));
     } catch (err) {
-      return rejectWithValue(err.response.data);
+      return rejectWithValue(err.response?.data || { error: err.message });
     }
   }
 );
@@ -68,6 +77,7 @@ const sessionSlice = createSlice({
   },
   reducers: {
     setSelectedSession: (state, action) => {
+      // Always store the mediaId string (e.g. "session_1234"), never the Mongo _id
       state.selectedSessionId = action.payload;
       // Reset report state so the new session starts fresh
       state.currentReport = null;

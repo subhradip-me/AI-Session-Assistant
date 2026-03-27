@@ -6,6 +6,7 @@ import redis from "../src/config/redis.js";
 import SessionReport from "../src/models/SessionReport.js";
 import AIAnalysisService from "../src/services/AIAnalysisService.js";
 import connectDB from "../src/config/db.js";
+import { updatePipelineState, publishPipelineEvent, logJobAudit, markSessionFailed } from "../src/utils/workerObservability.js";
 
 // Load environment variables relative to this file's location
 const __filename = fileURLToPath(import.meta.url);
@@ -101,6 +102,11 @@ const worker = new Worker(
     );
 
     console.log(`📄 Report saved for ${mediaId} (${content.length} chars)`);
+
+    // ✔ Mark session as fully completed
+    await updatePipelineState(mediaId, { "steps.report.status": "completed" }, "completed");
+    await publishPipelineEvent(mediaId, "report", "completed");
+    await logJobAudit(mediaId, "reportGeneratorWorker", job.id, "completed");
   },
   {
     connection: redis,
@@ -113,6 +119,10 @@ worker.on("completed", (job) => {
   console.log(`✅ Report generator job ${job.id} completed`);
 });
 
-worker.on("failed", (job, err) => {
+worker.on("failed", async (job, err) => {
   console.error(`❌ Report generator job ${job?.id} failed:`, err.message);
+  const { mediaId } = job?.data || {};
+  if (mediaId) {
+    await markSessionFailed(mediaId, "report", job.id, err);
+  }
 });

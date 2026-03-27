@@ -1,4 +1,5 @@
 import { Worker } from "bullmq";
+import redis from "../src/config/redis.js";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
@@ -9,11 +10,16 @@ import TranscriptBufferService from "../src/services/TranscriptBufferService.js"
 import aggregationQueue from "../src/queues/aggregationQueue.js";
 import windowDiarizationQueue from "../src/queues/windowDiarizationQueue.js";
 import EventService from "../src/services/EventService.js";
+import connectDB from "../src/config/db.js";
+import { updatePipelineState, publishPipelineEvent, logJobAudit, markSessionFailed } from "../src/utils/workerObservability.js";
 
-// Load environment variables (required for Kafka broker address)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 dotenv.config({ path: join(__dirname, "../.env") });
+
+connectDB();
+
+console.log("🎧 Transcription Worker Started");
 
 const worker = new Worker(
   "transcriptionQueue",
@@ -22,6 +28,8 @@ const worker = new Worker(
     console.log("Incoming job data:", job.data);
 
     const { mediaId, chunkIndex, chunkName, chunkPath, userId } = job.data;
+
+    await logJobAudit(mediaId, "transcriptionWorker", job.id, "started", null, { chunkIndex });
 
     // fallback if path not provided
     const finalPath =
@@ -78,32 +86,34 @@ const worker = new Worker(
     // Get total chunks from job data
     const totalChunks = job.data.totalChunks || (chunkIndex + 1);
 
+    // Update SessionState: increment completed chunk count
+    await updatePipelineState(mediaId, {
+      "steps.transcription.completedChunks": chunkIndex + 1,
+      "steps.transcription.totalChunks":     totalChunks,
+      "steps.transcription.status":          "running"
+    }, "transcribing");
+
+    await publishPipelineEvent(mediaId, "transcription", "running", { completedChunks: chunkIndex + 1, totalChunks });
+
     // Emit per-chunk event
-    await EventService.emit("CHUNK_TRANSCRIBED", {
-      mediaId,
-      chunkIndex,
-      totalChunks
-    });
+    await EventService.emit("CHUNK_TRANSCRIBED", { mediaId, chunkIndex, totalChunks });
 
     // Check if all chunks are complete
     const done = await TranscriptService.isComplete(mediaId, totalChunks);
-
     console.log(`Completion check: ${done} (${chunkIndex + 1}/${totalChunks} chunks)`);
 
     // Notify aggregator if all chunks are complete
     if (done) {
       console.log("✅ All chunks complete! Notifying aggregator...");
-      await aggregationQueue.add("aggregate", {
-        mediaId,
-        userId
-      });
-      // Emit session-level completion event
-      await EventService.emit("TRANSCRIPTION_COMPLETE", {
-        mediaId,
-        totalChunks
-      });
+      await aggregationQueue.add("aggregate", { mediaId, userId });
+      await EventService.emit("TRANSCRIPTION_COMPLETE", { mediaId, totalChunks });
+
+      // Mark transcription step as completed
+      await updatePipelineState(mediaId, { "steps.transcription.status": "completed" });
+      await publishPipelineEvent(mediaId, "transcription", "completed", { totalChunks });
     }
 
+    await logJobAudit(mediaId, "transcriptionWorker", job.id, "completed", null, { chunkIndex });
     return { transcript, chunkName }; 
     } catch (err) {
       console.error("Error processing job:", err);
@@ -111,10 +121,7 @@ const worker = new Worker(
     }   
   },
   {
-    connection: {
-      host: "127.0.0.1",
-      port: 6379
-    }
+    connection: redis
   }
 );
 
@@ -122,8 +129,10 @@ worker.on("completed", job => {
   console.log(`Job ${job.id} completed`);
 });
 
-worker.on("failed", (job, err) => {
+worker.on("failed", async (job, err) => {
   console.error(`Job ${job.id} failed`, err);
+  const { mediaId } = job?.data || {};
+  if (mediaId) {
+    await markSessionFailed(mediaId, "transcription", job.id, err);
+  }
 });
-
-console.log("🎧 Transcription Worker Started");

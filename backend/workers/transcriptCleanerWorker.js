@@ -1,8 +1,12 @@
 import { Worker } from "bullmq";
+import redis from "../src/config/redis.js";
 import TranscriptCleaner from "../src/services/TranscriptCleaner.js";
 import EventService from "../src/services/EventService.js";
 import grouperQueue from "../src/queues/grouperQueue.js";
+import connectDB from "../src/config/db.js";
+import { updatePipelineState, publishPipelineEvent, logJobAudit, markSessionFailed } from "../src/utils/workerObservability.js";
 
+connectDB();
 console.log("🧹 Transcript Cleaner Worker Started");
 
 const worker = new Worker(
@@ -10,9 +14,13 @@ const worker = new Worker(
   async (job) => {
     try {
       const { mediaId, segments, windowId, userId } = job.data;
-
-      // Check if this is a window-based cleaning (from windowDiarizationWorker)
       const isWindowJob = !!windowId;
+
+      if (!isWindowJob) {
+        // Only update state for full-path cleaning (not window path)
+        await updatePipelineState(mediaId, { "steps.grouping.status": "running" });
+        await publishPipelineEvent(mediaId, "grouping", "running");
+      }
 
       if (isWindowJob) {
         console.log(`🪟 [Window Cleaner] Processing: ${windowId}`);
@@ -67,10 +75,9 @@ const worker = new Worker(
     }
   },
   {
-    connection: {
-      host: "127.0.0.1",
-      port: 6379
-    }
+    connection: redis,
+    lockDuration:    90_000,   // 90s — cleaning is fast, fail if stuck
+    maxStalledCount: 2
   }
 );
 
@@ -78,6 +85,10 @@ worker.on("completed", (job) => {
   console.log(`✅ Cleaner job ${job.id} completed`);
 });
 
-worker.on("failed", (job, err) => {
+worker.on("failed", async (job, err) => {
   console.error(`❌ Cleaner job ${job?.id} failed:`, err.message);
+  const { mediaId, windowId } = job?.data || {};
+  if (mediaId && !windowId) {
+    await markSessionFailed(mediaId, "grouping", job.id, err);
+  }
 });

@@ -2,6 +2,7 @@ import AudioService   from "../services/AudioService.js";
 import ChunkService   from "../services/ChunkService.js";
 import StorageService from "../services/storageService.js";
 import Session        from "../models/Session.js";
+import SessionState   from "../models/SessionState.js";
 
 class UploadController {
 
@@ -16,6 +17,28 @@ class UploadController {
       const sessionId = `session_${Date.now()}`;
 
       console.log(`Upload received for user ${userId}:`, req.file.path);
+
+      // ─── Initialize SessionState immediately ─────────────────────────────
+      await SessionState.findOneAndUpdate(
+        { mediaId: sessionId },
+        {
+          $setOnInsert: {
+            mediaId:  sessionId,
+            userId,
+            status:   "uploading",
+            steps: {
+              transcription: { status: "pending", completedChunks: 0, totalChunks: 0 },
+              diarization:   { status: "pending" },
+              grouping:      { status: "pending" },
+              analysis:      { status: "pending", processedSegments: 0, totalSegments: 0 },
+              blocks:        { status: "pending", completedBlocks: 0, totalBlocks: 0 },
+              report:        { status: "pending" },
+              embedding:     { status: "pending" }
+            }
+          }
+        },
+        { upsert: true, new: true }
+      );
 
       // Step 1: Extract audio from the uploaded video
       const audioPath = await AudioService.extractAudio(req.file.path);
@@ -32,7 +55,19 @@ class UploadController {
         title:   req.file.originalname || ""
       });
 
-      // Step 4: Upload chunks to MinIO + enqueue transcription jobs
+      // Step 4: Update SessionState to transcribing with total chunk count
+      await SessionState.updateOne(
+        { mediaId: sessionId },
+        {
+          $set: {
+            status: "transcribing",
+            "steps.transcription.totalChunks": chunkFiles.length,
+            "steps.transcription.status": "running"
+          }
+        }
+      );
+
+      // Step 5: Upload chunks to MinIO + enqueue transcription jobs
       //         userId is forwarded through the queue so every worker knows the owner
       const uploadedChunks = await StorageService.uploadChunks(
         chunkDir,

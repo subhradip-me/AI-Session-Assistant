@@ -1,9 +1,11 @@
 import { Worker } from "bullmq";
+import redis from "../src/config/redis.js";
 import SegmentGrouper from "../src/services/SegmentGrouper.js";
 import EventService from "../src/services/EventService.js";
 import Transcript from "../src/models/Transcript.js";
 import { analysisQueue } from "../src/queues/analysisQueue.js";
 import connectDB from "../src/config/db.js";
+import { updatePipelineState, publishPipelineEvent, logJobAudit, markSessionFailed } from "../src/utils/workerObservability.js";
 
 // Connect to MongoDB
 connectDB();
@@ -46,6 +48,8 @@ const worker = new Worker(
 
       if (!isWindowJob) {
         // For full transcript: update MongoDB with ALL grouped segments
+        // upsert:true ensures the Transcript doc is created even if Path B's
+        // speakerDiarizationWorker never ran (e.g. Path A-only sessions).
         await Transcript.findOneAndUpdate(
           { mediaId },
           {
@@ -53,7 +57,7 @@ const worker = new Worker(
             status: 'grouped',
             updatedAt: new Date()
           },
-          { new: true }
+          { new: true, upsert: true }
         );
 
         console.log(`  Saved grouped transcript to database for ${mediaId}`);
@@ -64,11 +68,16 @@ const worker = new Worker(
         });
       } else {
         // For window: emit window-specific event
-        await EventService.emit("WINDOW_GROUPED_READY", {
-          mediaId,
-          windowId,
-          groups
+        await EventService.emit("WINDOW_GROUPED_READY", { mediaId, windowId, groups });
+      }
+
+      if (!isWindowJob) {
+        await updatePipelineState(mediaId, {
+          "steps.grouping.status":  "completed",
+          "steps.analysis.status": "running",
+          "steps.analysis.totalSegments": validGroups.length
         });
+        await publishPipelineEvent(mediaId, "grouping", "completed", { totalSegments: validGroups.length });
       }
 
       if (validGroups.length === 0) {
@@ -119,10 +128,9 @@ const worker = new Worker(
     }
   },
   {
-    connection: {
-      host: "127.0.0.1",
-      port: 6379
-    }
+    connection: redis,
+    lockDuration:    120_000,  // 2 min — grouping can be slow for large transcripts
+    maxStalledCount: 2
   }
 );
 
@@ -130,6 +138,10 @@ worker.on("completed", (job) => {
   console.log(`✅ Grouper job ${job.id} completed`);
 });
 
-worker.on("failed", (job, err) => {
+worker.on("failed", async (job, err) => {
   console.error(`❌ Grouper job ${job?.id} failed:`, err.message);
+  const { mediaId, windowId } = job?.data || {};
+  if (mediaId && !windowId) {
+    await markSessionFailed(mediaId, "grouping", job.id, err);
+  }
 });

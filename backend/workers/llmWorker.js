@@ -11,6 +11,7 @@ import EventService from "../src/services/EventService.js";
 import { insightAggregationQueue } from "../src/queues/insightAggregationQueue.js";
 import { blockQueue } from "../src/queues/blockQueue.js";
 import connectDB from "../src/config/db.js";
+import { updatePipelineState, publishPipelineEvent, logJobAudit, markSessionFailed } from "../src/utils/workerObservability.js";
 
 // ─── Rate-limit helpers ───────────────────────────────────────────────────────
 // Local copies — avoids circular imports from AIAnalysisService.
@@ -198,11 +199,15 @@ const worker = new Worker(
       { upsert: true, new: true }
     );
 
-    await EventService.emit("SEGMENT_ANALYSIS_READY", {
-      mediaId,
-      segmentId,
-      analysis: result
+    await EventService.emit("SEGMENT_ANALYSIS_READY", { mediaId, segmentId, analysis: result });
+
+    // Update progress — increment processedSegments
+    const processedCount = await SegmentAnalysis.countDocuments({ mediaId, segmentId: { $type: "number" }, summary: { $exists: true } });
+    await updatePipelineState(mediaId, {
+      "steps.analysis.processedSegments": processedCount,
+      "steps.analysis.totalSegments":     totalSegments || processedCount
     });
+    await publishPipelineEvent(mediaId, "analysis", "running", { processedSegments: processedCount, totalSegments });
 
     // ── 4. Block Aggregation trigger ────────────────────────────────────────
     //   Only runs for Path B (numeric segmentIds). Window-based (string) IDs
@@ -270,21 +275,13 @@ const worker = new Worker(
   },
   {
     connection: redis,
-
-    // Only 2 LLM calls in-flight at any time — prevents API burst
     concurrency: 2,
-
-    // BullMQ rate limiter: queue processes at most 20 jobs per 60 s globally
-    // across ALL llmWorker instances. This maps to ~1 call every 3 s on average,
-    // well under both Groq (6000 RPM free) and Gemini (15 RPM free) limits.
+    lockDuration:    300_000,  // 5 min — LLM calls can be slow under rate limiting
+    maxStalledCount: 1,        // Fail fast on stall, let BullMQ backoff retry
     limiter: {
       max: 20,
       duration: 60_000
     },
-
-    // Custom backoff — reads the exact retry delay encoded in the thrown error.
-    // err.retryAfterMs is set when both providers fail simultaneously.
-    // Handles: Groq TPD (~4-8 min), Gemini per-minute (~54s), Gemini PerDay (2h).
     settings: {
       backoffStrategy: (attemptsMade, type, err) => {
         const delay = err?.retryAfterMs ?? parseRetryDelay(err);
@@ -299,6 +296,10 @@ worker.on("completed", (job) => {
   console.log(`LLM job ${job.id} completed`);
 });
 
-worker.on("failed", (job, err) => {
+worker.on("failed", async (job, err) => {
   console.error(`❌ LLM job ${job?.id} failed:`, err.message);
+  const { mediaId } = job?.data || {};
+  if (mediaId) {
+    await markSessionFailed(mediaId, "analysis", job.id, err);
+  }
 });

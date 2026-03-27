@@ -1,8 +1,9 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import { Search, Plus, MoreHorizontal, Upload, X, FileAudio, FileVideo, Loader2 } from 'lucide-react';
+import { Search, Plus, MoreHorizontal, Upload, X, FileAudio, FileVideo, Loader2, Trash2 } from 'lucide-react';
 import { setSelectedSession, uploadFile, fetchSessions } from '../slices/sessionSlice';
 import { joinSessionRoom } from '../services/socket';
+import { fetchPipelineStatus, deleteSession } from '../slices/pipelineSlice';
 
 const STATUS_MAP = {
   uploading:    { label: 'Uploading',    cls: 'badge-uploading'  },
@@ -171,6 +172,35 @@ export default function Conversations() {
   const pipeline = useSelector((s) => s.pipeline);
   const [query, setQuery] = useState('');
   const [showUpload, setShowUpload] = useState(false);
+  const [menuOpenId, setMenuOpenId] = useState(null); // mediaId of session with open menu
+  const [deletingId, setDeletingId] = useState(null); // mediaId currently being deleted
+  const menuRef = useRef(null);
+
+  // Close context menu on outside click
+  useEffect(() => {
+    if (!menuOpenId) return;
+    const handler = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) {
+        setMenuOpenId(null);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [menuOpenId]);
+
+  // On load: re-fetch status for all sessions so badges are current after reload
+  useEffect(() => {
+    if (sessions.length > 0) {
+      sessions.forEach((s) => {
+        const st = pipeline[s.mediaId]?.status || s.status;
+        // Skip already-terminal or already-resolved sessions
+        if (st !== 'completed' && st !== 'failed' && st !== 'not_found') {
+          dispatch(fetchPipelineStatus(s.mediaId));
+        }
+      });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions.length]);
 
   const filtered = sessions.filter((s) =>
     s.originalFilename?.toLowerCase().includes(query.toLowerCase()) ||
@@ -178,13 +208,26 @@ export default function Conversations() {
   );
 
   const handleSelect = (session) => {
-    dispatch(setSelectedSession(session._id || session.mediaId));
-    joinSessionRoom(session._id || session.mediaId);
+    const id = session.mediaId;
+    dispatch(setSelectedSession(id));
+    joinSessionRoom(id);
   };
 
   const getStatus = (session) => {
-    const id = session._id || session.mediaId;
+    const id = session.mediaId;
     return pipeline[id]?.status || session.status || 'queued';
+  };
+
+  const handleDelete = async (e, mediaId) => {
+    e.stopPropagation();
+    setMenuOpenId(null);
+    if (!window.confirm('Delete this session\'s report and insights? The session will remain for reprocessing.')) return;
+    setDeletingId(mediaId);
+    try {
+      await dispatch(deleteSession(mediaId));
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   return (
@@ -212,7 +255,7 @@ export default function Conversations() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search sessions…"
-              className="w-full bg-white border border-[#ecece9] text-gray-700 rounded-lg py-1.5 pl-8 pr-3 text-[12px] font-medium outline-none focus:ring-1 focus:ring-indigo-200 focus:border-indigo-300 transition-all placeholder:text-gray-400 shadow-[0_1px_3px_rgba(0,0,0,0.03)]"
+              className="w-full bg-white border border-[#ecece9] text-gray-700 rounded-lg py-1.5 pl-8 pr-3 text-[13px] font-medium outline-none focus:ring-1 focus:ring-indigo-200 focus:border-indigo-300 transition-all placeholder:text-gray-400 shadow-[0_1px_3px_rgba(0,0,0,0.03)]"
               aria-label="Search sessions"
             />
           </div>
@@ -245,7 +288,7 @@ export default function Conversations() {
           )}
 
           {filtered.map((session) => {
-            const id = session._id || session.mediaId;
+            const id = session.mediaId; // Always mediaId — consistent with pipeline slice keys
             const isActive = selectedId === id;
             const status = getStatus(session);
             const title = session.title || session.originalFilename || 'Untitled Session';
@@ -264,22 +307,50 @@ export default function Conversations() {
                   <h4 className={`text-[13px] font-semibold leading-tight truncate flex-1 ${isActive ? 'text-gray-900' : 'text-gray-700'}`}>
                     {title}
                   </h4>
-                  <button
-                    onClick={(e) => e.stopPropagation()}
-                    className="p-0.5 text-gray-300 hover:text-gray-600 opacity-0 group-hover:opacity-100 transition-all rounded"
-                    aria-label="Session options"
-                  >
-                    <MoreHorizontal className="w-3.5 h-3.5" />
-                  </button>
+
+                  {/* Options button */}
+                  <div className="relative shrink-0" ref={menuOpenId === id ? menuRef : null}>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMenuOpenId(menuOpenId === id ? null : id);
+                      }}
+                      className={`p-0.5 rounded transition-all ${
+                        deletingId === id
+                          ? 'text-gray-300 cursor-wait'
+                          : 'text-gray-300 hover:text-gray-600 opacity-0 group-hover:opacity-100'
+                      }`}
+                      aria-label="Session options"
+                      disabled={deletingId === id}
+                    >
+                      {deletingId === id
+                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : <MoreHorizontal className="w-3.5 h-3.5" />}
+                    </button>
+
+                    {/* Dropdown menu */}
+                    {menuOpenId === id && (
+                      <div className="absolute right-0 top-full mt-1 w-44 bg-white border border-[#ecece9] rounded-xl shadow-lg z-50 overflow-hidden animate-scale-in">
+                        <button
+                          onClick={(e) => handleDelete(e, id)}
+                          className="flex items-center gap-2.5 w-full px-3 py-2.5 text-[13px] font-medium text-red-600 hover:bg-red-50 transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 shrink-0" />
+                          Delete Report
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 <div className="flex items-center justify-between mt-1.5">
-                  <span className="text-[11px] text-gray-400">{formatDate(session.createdAt)}</span>
+                  <span className="text-[12px] text-gray-400">{formatDate(session.createdAt)}</span>
                   <StatusBadge status={status} />
                 </div>
               </div>
             );
           })}
+
         </div>
       </div>
 

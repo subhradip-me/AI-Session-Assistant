@@ -1,11 +1,9 @@
-import { Queue } from "bullmq"; 
+import { Queue } from "bullmq";
+import redis from "../config/redis.js";
 
 // This queue will handle speaker diarization tasks after transcription is complete
 const diarizationQueue = new Queue("speaker-diarization", {
-  connection: {
-    host: "127.0.0.1",
-    port: 6379
-  }
+  connection: redis
 });
 
 export default diarizationQueue;

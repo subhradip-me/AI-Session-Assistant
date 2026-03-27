@@ -14,16 +14,20 @@
  */
 
 import { Worker } from "bullmq";
+import redis from "../src/config/redis.js";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import SpeakerSegmentationService from "../src/services/SpeakerSegmentationService.js";
 import cleanerQueue from "../src/queues/cleanerQueue.js";
 import EventService from "../src/services/EventService.js";
+import connectDB from "../src/config/db.js";
+import { updatePipelineState, publishPipelineEvent, logJobAudit, markSessionFailed } from "../src/utils/workerObservability.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 dotenv.config({ path: join(__dirname, "../.env") });
+connectDB();
 
 const worker = new Worker(
   "window-diarization",
@@ -31,6 +35,8 @@ const worker = new Worker(
     try {
       const { mediaId, windowId, chunkRange, combinedText, userId } = job.data;
 
+      await updatePipelineState(mediaId, { "steps.diarization.status": "running" }, "diarizing");
+      await publishPipelineEvent(mediaId, "diarization", "running");
       console.log(`\n🎤 [Window Diarization] Processing: ${windowId}`);
       console.log(`   Chunks: ${chunkRange.start} → ${chunkRange.end}`);
       console.log(`   Text length: ${combinedText.length} characters`);
@@ -95,10 +101,7 @@ const worker = new Worker(
     }
   },
   {
-    connection: {
-      host: "127.0.0.1",
-      port: 6379
-    }
+    connection: redis
   }
 );
 
@@ -106,8 +109,12 @@ worker.on("completed", job => {
   console.log(`✅ Job ${job.id} completed (window diarization)`);
 });
 
-worker.on("failed", (job, err) => {
+worker.on("failed", async (job, err) => {
   console.error(`❌ Job ${job.id} failed (window diarization):`, err.message);
+  const { mediaId } = job?.data || {};
+  if (mediaId) {
+    await markSessionFailed(mediaId, "diarization", job.id, err);
+  }
 });
 
 console.log("🎤 Window Diarization Worker Started");

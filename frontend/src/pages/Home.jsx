@@ -40,12 +40,12 @@ export default function Home() {
   const stats = useMemo(() => {
     const total    = sessions.length;
     const complete = sessions.filter((s) => {
-      const pid = s._id || s.mediaId;
+      const pid = s.mediaId;
       const ps  = pipeline[pid]?.status || s.status;
       return ps === 'completed';
     }).length;
     const failed   = sessions.filter((s) => {
-      const pid = s._id || s.mediaId;
+      const pid = s.mediaId;
       const ps  = pipeline[pid]?.status || s.status;
       return ps === 'failed';
     });
@@ -62,7 +62,7 @@ export default function Home() {
     const items = [];
     stats.failed.slice(0, 2).forEach((s) => {
       items.push({
-        id: s._id || s.mediaId,
+        id: s.mediaId,
         color: 'bg-red-400',
         title: `Retry failed session`,
         subtitle: s.title || s.originalFilename || 'Untitled',
@@ -71,14 +71,14 @@ export default function Home() {
     });
     const recent = sessions
       .filter((s) => {
-        const pid = s._id || s.mediaId;
+        const pid = s.mediaId;
         const ps  = pipeline[pid]?.status || s.status;
         return ps === 'completed';
       })
       .slice(0, 2 - items.length);
     recent.forEach((s) => {
       items.push({
-        id: s._id || s.mediaId,
+        id: s.mediaId,
         color: 'bg-emerald-400',
         title: 'Review session summary',
         subtitle: s.title || s.originalFilename || 'Untitled',

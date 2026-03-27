@@ -1,4 +1,5 @@
 import { Worker } from "bullmq";
+import redis from "../src/config/redis.js";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
@@ -11,6 +12,7 @@ import AIAnalysisService from "../src/services/AIAnalysisService.js";
 import reportQueue from "../src/queues/reportQueue.js";
 import { updateMemory } from "../src/services/memoryService.js";
 import connectDB from "../src/config/db.js";
+import { updatePipelineState, publishPipelineEvent, logJobAudit, markSessionFailed } from "../src/utils/workerObservability.js";
 
 // Load environment variables
 const __filename = fileURLToPath(import.meta.url);
@@ -139,6 +141,8 @@ const worker = new Worker(
 
     const { mediaId, totalSegments, userId } = job.data;
 
+    await updatePipelineState(mediaId, { "steps.blocks.status": "completed" }, "aggregating");
+    await publishPipelineEvent(mediaId, "aggregating", "running");
     console.log(`🔄 Aggregating insights for ${mediaId} (${totalSegments} segments)`);
 
     const intelligence = await aggregateSession(mediaId);
@@ -191,10 +195,7 @@ const worker = new Worker(
 
   },
   {
-    connection: {
-      host: "127.0.0.1",
-      port: 6379
-    },
+    connection: redis,
     // Prevent completed/failed jobs from accumulating in Redis indefinitely.
     // Without this, old jobs can re-trigger on worker restart and cause
     // SESSION_INTELLIGENCE_READY to be emitted multiple times for old sessions.
@@ -207,6 +208,10 @@ worker.on("completed", (job) => {
   console.log(`Session insight aggregation job ${job.id} completed`);
 });
 
-worker.on("failed", (job, err) => {
+worker.on("failed", async (job, err) => {
   console.error(`Session insight aggregation job ${job?.id} failed:`, err.message);
+  const { mediaId } = job?.data || {};
+  if (mediaId) {
+    await markSessionFailed(mediaId, "aggregating", job.id, err);
+  }
 });

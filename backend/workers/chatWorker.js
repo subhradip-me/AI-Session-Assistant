@@ -10,6 +10,7 @@ import { detectIntent, rewriteQuery } from "../src/services/intentService.js";
 import { captureFeedback }            from "../src/services/retrievalOptimizer.js";
 import UserMemory         from "../src/models/UserMemory.js";
 import connectDB from "../src/config/db.js";
+import { logJobAudit } from "../src/utils/workerObservability.js";
 
 // Load environment variables
 const __filename = fileURLToPath(import.meta.url);
@@ -27,6 +28,8 @@ const worker = new Worker(
     const { mediaId, question, userId } = job.data;
 
     console.log(`💬 [${mediaId}] Question: "${question}"`);
+
+    await logJobAudit(mediaId, "chatWorker", job.id, "started", null, { question });
 
     // ── 0. Load user memory (needed for intent rewrite + context + vector nudge) ──
     let userMemory = null;
@@ -172,6 +175,7 @@ Answer:`;
       answer
     }).catch(err => console.warn(`⚠️  Feedback capture failed: ${err.message}`));
 
+    await logJobAudit(mediaId, "chatWorker", job.id, "completed");
     return {
       answer,
       retrievedBlocks:   retrieved.blocks.length,
@@ -191,8 +195,12 @@ worker.on("completed", (job) => {
   console.log(`✅ Chat job ${job.id} completed`);
 });
 
-worker.on("failed", (job, err) => {
+worker.on("failed", async (job, err) => {
   console.error(`❌ Chat job ${job?.id} failed:`, err.message);
+  const { mediaId } = job?.data || {};
+  if (mediaId) {
+    await logJobAudit(mediaId, "chatWorker", job.id, "failed", err.message);
+  }
 });
 
 // ─── Intent-specific answer instructions ──────────────────────────────────────

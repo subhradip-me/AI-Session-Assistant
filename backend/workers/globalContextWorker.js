@@ -7,6 +7,7 @@ import AIAnalysisService from "../src/services/AIAnalysisService.js";
 import SessionContext from "../src/models/SessionContext.js";
 import EventService from "../src/services/EventService.js";
 import connectDB from "../src/config/db.js";
+import { updatePipelineState, publishPipelineEvent, logJobAudit, markSessionFailed } from "../src/utils/workerObservability.js";
 
 // Load environment variables
 const __filename = fileURLToPath(import.meta.url);
@@ -53,7 +54,7 @@ async function buildGlobalContext(chunkResults) {
   };
 }
 
-new Worker(
+const worker = new Worker(
   "global-context",
   async (job) => {
 
@@ -97,12 +98,8 @@ new Worker(
     console.log(`✅ Global context saved for ${mediaId}`);
     console.log(`   Topics: ${finalContext.topics.length}, Insights: ${finalContext.insights.length}`);
 
-    await EventService.emit("GLOBAL_CONTEXT_READY", {
-      mediaId,
-      summary:  finalContext.summary,
-      topics:   finalContext.topics,
-      insights: finalContext.insights
-    });
+    await EventService.emit("GLOBAL_CONTEXT_READY", { mediaId, summary: finalContext.summary, topics: finalContext.topics, insights: finalContext.insights });
+    await publishPipelineEvent(mediaId, "globalContext", "completed");
 
   },
   {
@@ -110,3 +107,11 @@ new Worker(
     concurrency: 1    // one job at a time — prevents parallel duplicate runs
   }
 );
+
+worker.on("failed", async (job, err) => {
+  console.error(`❌ Global Context job ${job?.id} failed:`, err.message);
+  const { mediaId } = job?.data || {};
+  if (mediaId) {
+    await markSessionFailed(mediaId, "globalContext", job.id, err);
+  }
+});

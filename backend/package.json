@@ -13,6 +13,8 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@bull-board/api": "^6.20.6",
+    "@bull-board/express": "^6.20.6",
     "@google/generative-ai": "^0.24.1",
     "@qdrant/js-client-rest": "^1.17.0",
     "bcryptjs": "^3.0.3",
@@ -28,6 +30,7 @@
     "mongoose": "^9.2.4",
     "multer": "^2.1.1",
     "openai": "^6.27.0",
+    "socket.io": "^4.8.3",
     "uuid": "^13.0.0"
   },
   "devDependencies": {

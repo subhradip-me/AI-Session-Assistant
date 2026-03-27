@@ -18,13 +18,14 @@ export default function AppLayout() {
 
     // Initialize the socket and wire pipeline events to Redux
     const socket = getSocket();
+    // Server broadcasts as 'pipeline:update' (see server.js subscriber)
     const handlePipelineEvent = (payload) => {
       dispatch(applyPipelineEvent(payload));
     };
-    socket.on('pipeline:event', handlePipelineEvent);
+    socket.on('pipeline:update', handlePipelineEvent);
 
     return () => {
-      socket.off('pipeline:event', handlePipelineEvent);
+      socket.off('pipeline:update', handlePipelineEvent);
     };
   }, [dispatch, token]);
 

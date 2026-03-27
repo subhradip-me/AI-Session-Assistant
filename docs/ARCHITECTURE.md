@@ -1,8 +1,8 @@
 # AI Session Assistant — Architecture Documentation
 
-**Version**: 6.0.0 (Phase G — Intelligence Layer: Memory + Intent + Multi-Agent Reasoning)  
-**Last Updated**: March 20, 2026  
-**Status**: ✅ Fully Operational — 14 workers, 14 queues, 3 API endpoints, 9 models
+**Version**: 6.1.0 (Phase H — Stability & Pipeline Resilience)  
+**Last Updated**: March 28, 2026  
+**Status**: ✅ Fully Operational — 14 workers, 14 queues, 4 API endpoints, 10 models
 
 ---
 
@@ -56,6 +56,8 @@ The AI Session Assistant is an event-driven, microservices-style pipeline that p
 | **Intelligence depth ranking** | Retrieved blocks re-ranked by decisions×3 + insights×2 + action_items×2 |
 | **Multi-agent reasoning** | Agent 1 (Analyst) pre-reasons over context; Agent 2 (Answerer) builds answer from structured intelligence |
 | **Self-learning feedback** | Every answer auto-rated 1–5 by LLM; signal stored in `RetrievalFeedback` for future RL |
+| **Pipeline Resilience** | Stale job detection (30m threshold) + automatic polling suppression for terminal sessions |
+| **Surgical Delete** | `DELETE /api/session/:mediaId` removes insights/reports but preserves raw transcript for reprocessing |
 
 ---
 
@@ -570,6 +572,35 @@ Ask the AI assistant a question about a completed session.
 - Falls back gracefully if Qdrant is unavailable
 
 ---
+
+### DELETE /api/session/:mediaId
+
+Surgically deletes session intelligence (report + insights) while preserving raw data and transcripts. This allows for clean reprocessing without losing the underlying transcription.
+
+**Response 200**:
+```json
+{
+  "message": "Session report and insights deleted successfully",
+  "mediaId": "session_1773052227650",
+  "deleted": { "report": 1, "context": 5 }
+}
+```
+
+**Notes**:
+- Deletes `SessionReport` and `SessionContext` only.
+- Does NOT delete `Session`, `Transcript`, or `Audio`.
+- Pipeline state is reset to `queued` in the frontend for immediate reprocessing.
+
+---
+
+### GET /api/session/:mediaId/status
+
+Enhanced status endpoint with fallback logic for legacy sessions.
+
+**Notes**:
+- If `SessionState` exists → returns calculated progress (0-100%).
+- If missing but `SessionReport` exists → auto-creates `completed` state (backward compat).
+- Returns `not_found` for non-existent sessions to trigger frontend poll termination.
 
 ### GET /health
 
@@ -1406,6 +1437,24 @@ New components:
 - `chatWorker.js` — fully upgraded to RAG pipeline
 - `TranscriptService.js` — fully rewritten to MinIO (no local filesystem)
 
+
+### Phase H — Stability & Pipeline Resilience ✅ (March 28, 2026)
+
+This phase focused on long-term operational stability, fixing infinite polling loops, resolving worker deadlocks, and implementing surgical session management.
+
+**New components:**
+- Enriched `GET /api/sessions` — joined with `SessionState` + `SessionReport` for zero-poll session list loading.
+- `DELETE /api/session/:mediaId` — surgical intelligence purge.
+- `drainSessionJobs(mediaId)` — utility to remove stale BullMQ jobs before restart.
+- Non-blocking `analysisWorker` — fire-and-forget parallel segment dispatch.
+
+**Reliability improvements:**
+- **Polling Suppression**: Frontend stops polling immediately on `completed`, `failed`, or `not_found` statuses.
+- **Stale Job Auto-Recovery**: `assertNotProcessing` now allows reprocessing if a job has been "active" for >30 minutes (crashed worker recovery).
+- **Worker Lock Timeouts**: `lockDuration` + `maxStalledCount` added to all workers to prevent perpetual queue blocks.
+- **Transcript Reconstruction**: `reprocess()` now rebuilds transcripts from MinIO raw chunks if the `Transcript` document is missing.
+- **Auto-Retry Stage Detection**: `retry()` now walks the pipeline in order to find the first non-complete stage automatically.
+
 ---
 
 ## 14. Troubleshooting
@@ -1432,6 +1481,9 @@ New components:
 | UserMemory not created after session | `userId` missing from upload job data | Ensure `userId` is included when enqueuing `insight-aggregation` job |
 | Intent detection returns `unknown` | LLM returned unexpected label | Graceful fallback to `question_answer` — check Groq API key |
 | chatWorker slow (>15s) | Both agent LLM calls rate-limited simultaneously | Same Groq rate limit applies — add delay or switch agent2 to Gemini |
+| 404 Polling Error spam | Backend not restarted after route change or legacy session | Restart backend; status endpoint auto-heals legacy sessions with reports |
+| 409 Conflict on reprocess | Stale "active" job in DB from crashed worker | Wait for 30m staleness threshold; reprocess will auto-clear the lock |
+| Reprocess stuck at 35% | BullMQ jobId deduplication blocked new grouper job | Fixed with `drainSessionJobs()` during reprocess (manual clean first) |
 
 ---
 
@@ -1441,8 +1493,8 @@ New components:
 |---|---|
 | Total workers | 14 |
 | Total BullMQ queues | 14 |
-| Total MongoDB models | 9 |
-| Total API endpoints | 3 (upload, report, chat) |
+| Total MongoDB models | 10 |
+| Total API endpoints | 4 (upload, status, report, chat) |
 | Kafka events | 16 |
 | LLM calls saved vs naïve | 85–95% (blocks + dedup optimizations) |
 | Time to first insight | ~120 seconds (Path A window) |

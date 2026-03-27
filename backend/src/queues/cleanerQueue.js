@@ -1,10 +1,8 @@
 import { Queue } from "bullmq";
+import redis from "../config/redis.js";
 
 const cleanerQueue = new Queue("transcript-cleaner", {
-  connection: {
-    host: "127.0.0.1",
-    port: 6379
-  }
+  connection: redis
 });
 
 export default cleanerQueue;
