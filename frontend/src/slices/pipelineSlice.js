@@ -217,14 +217,8 @@ const pipelineSlice = createSlice({
       // ── Delete ────────────────────────────────────────────────────────────
       .addCase(deleteSession.fulfilled, (state, action) => {
         const { mediaId } = action.payload;
-        if (mediaId && state[mediaId]) {
-          // Reset to queued — report+insights gone but session still exists
-          state[mediaId].status   = 'queued';
-          state[mediaId].progress = 0;
-          state[mediaId].steps    = {};
-          state[mediaId].error    = null;
-          state[mediaId].actionError = null;
-        }
+        // Session is fully deleted from DB — remove from pipeline state entirely
+        delete state[mediaId];
       })
       .addCase(deleteSession.rejected, (state, action) => {
         // Nothing to update on failure — session is unchanged

@@ -53,8 +53,6 @@ function calculateProgress(state) {
 
 // ─── GET /api/session/:mediaId/status ────────────────────────────────────────
 
-import Session from "../models/Session.js";
-import SessionReport from "../models/SessionReport.js";
 
 export const getSessionStatus = async (req, res, next) => {
   try {
@@ -151,7 +149,7 @@ export const deleteSession = async (req, res, next) => {
     const { mediaId } = req.params;
     const userId = req.user?.userId;
 
-    // Security: verify session belongs to this user
+    // Security: verify session belongs to this user before deleting
     const session = await Session.findOne({ mediaId });
     if (!session) {
       return res.status(404).json({ error: "Session not found" });
@@ -160,24 +158,15 @@ export const deleteSession = async (req, res, next) => {
       return res.status(403).json({ error: "Access denied" });
     }
 
-    // Delete generated report + insight aggregation context
-    // (kept minimal as requested — raw audio, transcript, and pipeline preserved)
-    const [reportResult, contextResult] = await Promise.all([
-      SessionReport.deleteOne({ mediaId }),
-      SessionContext.deleteMany({ mediaId })
-    ]);
+    // Full delete: removes Session, SessionState, Transcript, all analyses,
+    // report, context, feedback, and Qdrant vectors.
+    await SessionControlService.deleteSession(mediaId);
 
-    console.log(
-      `🗑️  Delete [${mediaId}]: report=${reportResult.deletedCount}, context=${contextResult.deletedCount}`
-    );
+    console.log(`🗑️  Full delete completed for [${mediaId}]`);
 
     return res.json({
-      message: "Session report and insights deleted successfully",
-      mediaId,
-      deleted: {
-        report:  reportResult.deletedCount,
-        context: contextResult.deletedCount
-      }
+      message: "Session deleted successfully",
+      mediaId
     });
   } catch (err) {
     next(err);
@@ -189,8 +178,12 @@ export const deleteSession = async (req, res, next) => {
 export const reprocessSession = async (req, res, next) => {
   try {
     const { mediaId } = req.params;
+    // userId from JWT — passed through the worker queue chain so that
+    // SessionReport is saved with the correct userId (fixes report-not-found
+    // after reprocess when GET /report/:mediaId queries by { mediaId, userId }).
+    const userId = req.user?.userId;
 
-    await SessionControlService.reprocess(mediaId);
+    await SessionControlService.reprocess(mediaId, userId);
     return res.json({ message: "Reprocessing started — pipeline restarting from cleaner stage" });
   } catch (err) {
     // 409: session is actively processing — cannot start a second run

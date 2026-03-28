@@ -69,12 +69,24 @@ class UploadController {
 
       // Step 5: Upload chunks to MinIO + enqueue transcription jobs
       //         userId is forwarded through the queue so every worker knows the owner
-      const uploadedChunks = await StorageService.uploadChunks(
-        chunkDir,
-        sessionId,
-        chunkFiles.length,
-        userId          // 🔑 propagated through entire pipeline
-      );
+      let uploadedChunks;
+      try {
+        uploadedChunks = await StorageService.uploadChunks(
+          chunkDir,
+          sessionId,
+          chunkFiles.length,
+          userId          // 🔑 propagated through entire pipeline
+        );
+      } catch (uploadErr) {
+        // MinIO upload failed — roll back DB records so the session never
+        // appears in the sidebar as an orphaned "queued" entry.
+        console.error(`❌ Chunk upload failed for ${sessionId} — rolling back Session + SessionState`);
+        await Promise.all([
+          Session.deleteOne({ mediaId: sessionId }),
+          SessionState.deleteOne({ mediaId: sessionId })
+        ]).catch(() => {});
+        return res.status(500).json({ error: `Upload failed: ${uploadErr.message}` });
+      }
 
       console.log("Chunks uploaded:", uploadedChunks);
 
@@ -88,6 +100,9 @@ class UploadController {
       });
 
     } catch (error) {
+      // Early failure (before Session.create) — clean up SessionState if it was created
+      const { sessionId: sid } = res.locals || {};
+      if (sid) await SessionState.deleteOne({ mediaId: sid }).catch(() => {});
       console.error(error);
       return res.status(500).json({ error: error.message });
     }

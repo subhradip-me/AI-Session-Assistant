@@ -221,10 +221,19 @@ export default function Conversations() {
   const handleDelete = async (e, mediaId) => {
     e.stopPropagation();
     setMenuOpenId(null);
-    if (!window.confirm('Delete this session\'s report and insights? The session will remain for reprocessing.')) return;
+    if (!window.confirm('Permanently delete this session and all its analysis data? This cannot be undone.')) return;
     setDeletingId(mediaId);
     try {
       await dispatch(deleteSession(mediaId));
+      // Clear persisted chat history for this session from localStorage
+      try {
+        const raw = localStorage.getItem('ama_chat_history');
+        if (raw) {
+          const all = JSON.parse(raw);
+          delete all[mediaId];
+          localStorage.setItem('ama_chat_history', JSON.stringify(all));
+        }
+      } catch { /* silent */ }
     } finally {
       setDeletingId(null);
     }
@@ -336,7 +345,7 @@ export default function Conversations() {
                           className="flex items-center gap-2.5 w-full px-3 py-2.5 text-[13px] font-medium text-red-600 hover:bg-red-50 transition-colors"
                         >
                           <Trash2 className="w-3.5 h-3.5 shrink-0" />
-                          Delete Report
+                          Delete Session
                         </button>
                       </div>
                     )}

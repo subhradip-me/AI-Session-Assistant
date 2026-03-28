@@ -5,6 +5,7 @@ import SessionReport from "../models/SessionReport.js";
 import SessionContext from "../models/SessionContext.js";
 import Transcript from "../models/Transcript.js";
 import RetrievalFeedback from "../models/RetrievalFeedback.js";
+import Session from "../models/Session.js";
 import { llmQueue } from "../queues/llmQueue.js";
 import { blockQueue } from "../queues/blockQueue.js";
 import { embeddingQueue } from "../queues/embeddingQueue.js";
@@ -63,6 +64,9 @@ export async function retry(mediaId, stage) {
   const state = await SessionState.findOne({ mediaId });
   if (!state) throw new Error(`Session ${mediaId} not found`);
 
+  // Resolve userId for propagating through the worker chain
+  const userId = state.userId || undefined;
+
   // ── Auto-detect stuck stage if no explicit stage given ─────────────────────
   // Walk the pipeline steps in order and find the first non-completed one.
   // This lets the UI call retry with no stage and always hit the right place.
@@ -120,7 +124,7 @@ export async function retry(mediaId, stage) {
 
     await cleanerQueue.add(
       "clean",
-      { mediaId, segments: transcript.segments },
+      { mediaId, userId, segments: transcript.segments },
       {
         jobId: `reprocess-clean-${mediaId}`,
         removeOnComplete: false,
@@ -233,7 +237,7 @@ export async function retry(mediaId, stage) {
     if (!report) {
       await insightAggregationQueue.add(
         "aggregate-insights",
-        { mediaId, totalSegments },
+        { mediaId, userId, totalSegments },
         { jobId: `final-aggregate-${mediaId}`, removeOnComplete: true }
       );
       console.log(`🔁 Retry [report]: re-queued insight aggregation for ${mediaId}`);
@@ -260,9 +264,16 @@ export async function retry(mediaId, stage) {
  *   duplicate-key error if the doc already exists from a previous run.
  *   The Transcript is the preserved ground truth — we never re-transcribe audio.
  */
-export async function reprocess(mediaId) {
+export async function reprocess(mediaId, userId) {
   // ── Guard: prevent concurrent ops ─────────────────────────────────────────
   await assertNotProcessing(mediaId);
+
+  // Resolve userId from SessionState if caller didn't provide it
+  // (e.g. when called internally without a JWT context)
+  if (!userId) {
+    const state = await SessionState.findOne({ mediaId }, "userId").lean();
+    userId = state?.userId || undefined;
+  }
 
   // ── Resolve Transcript — rebuild from MinIO if missing ─────────────────────
   let transcript = await Transcript.findOne({ mediaId });
@@ -333,6 +344,8 @@ export async function reprocess(mediaId) {
     "clean",
     {
       mediaId,
+      userId,   // ← carry userId through the full worker chain so SessionReport
+                //   is saved with the correct userId (required by GET /report/:mediaId)
       segments: transcript.segments
     },
     {
@@ -355,13 +368,14 @@ export async function reprocess(mediaId) {
  */
 export async function deleteSession(mediaId) {
   await Promise.all([
+    Session.deleteOne({ mediaId }),        // ← THE root record (was missing!)
+    SessionState.deleteOne({ mediaId }),
     Transcript.deleteMany({ mediaId }),
     SegmentAnalysis.deleteMany({ mediaId }),
     BlockAnalysis.deleteMany({ mediaId }),
     SessionContext.deleteMany({ mediaId }),
     SessionReport.deleteOne({ mediaId }),
-    RetrievalFeedback.deleteMany({ mediaId }),
-    SessionState.deleteOne({ mediaId })
+    RetrievalFeedback.deleteMany({ mediaId })
   ]);
 
   // Delete Qdrant vectors — imported lazily to avoid circular deps

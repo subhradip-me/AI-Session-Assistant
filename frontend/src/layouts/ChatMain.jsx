@@ -9,7 +9,6 @@ import {
 } from 'lucide-react';
 import { fetchReport, clearCurrentReport } from '../slices/sessionSlice';
 import { fetchPipelineStatus, retrySession, reprocessSession, deleteSession } from '../slices/pipelineSlice';
-import { setSelectedSession } from '../slices/sessionSlice';
 
 // ─── Chat persistence helpers ─────────────────────────────────────────────────
 const CHAT_STORAGE_KEY = 'ama_chat_history';
@@ -530,9 +529,10 @@ export default function ChatMain() {
   };
 
   const handleDelete = async () => {
-    if (!window.confirm('Delete this session permanently?')) return;
+    if (!window.confirm('Permanently delete this session and all its analysis data? This cannot be undone.')) return;
+    setShowActions(false);
     await dispatch(deleteSession(selectedId));
-    dispatch(setSelectedSession(null));
+    // sessionSlice addMatcher handles: removing from sessions[], deselecting, clearing report
   };
 
   // ── Empty State ───────────────────────────────────────────────────────────
@@ -634,7 +634,7 @@ export default function ChatMain() {
                   </button>
                 )}
                 <button
-                  onClick={() => { handleDelete(); setShowActions(false); }}
+                  onClick={handleDelete}
                   className="w-full flex items-center gap-2.5 px-4 py-2.5 text-[13px] font-medium text-red-600 hover:bg-red-50 transition-colors"
                 >
                   <Trash2 className="w-4 h-4" /> Delete Session

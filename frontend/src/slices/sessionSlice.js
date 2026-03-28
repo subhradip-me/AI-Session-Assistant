@@ -65,6 +65,8 @@ export const fetchSessions = createAsyncThunk(
   }
 );
 
+
+
 const sessionSlice = createSlice({
   name: 'session',
   initialState: {
@@ -134,7 +136,23 @@ const sessionSlice = createSlice({
       })
       .addCase(fetchSessions.fulfilled, (state, action) => {
         state.sessions = action.payload;
-      });
+      })
+      // On full delete, remove the session from the list, deselect if active, and clear the report.
+      .addMatcher(
+        (action) => action.type === 'pipeline/delete/fulfilled',
+        (state, action) => {
+          const { mediaId } = action.payload;
+          // Remove from sidebar list — session is gone from DB
+          state.sessions = state.sessions.filter((s) => s.mediaId !== mediaId);
+          // Deselect and clear report if this was the open session
+          if (state.selectedSessionId === mediaId) {
+            state.selectedSessionId = null;
+            state.currentReport = null;
+            state.processing = false;
+            state.error = null;
+          }
+        }
+      );
   },
 });
 

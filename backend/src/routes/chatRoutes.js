@@ -110,7 +110,11 @@ router.get("/sessions", authenticate, async (req, res) => {
     const stateMap  = Object.fromEntries(states.map((s) => [s.mediaId, s]));
     const reportSet = new Set(reports.map((r) => r.mediaId));
 
-    const enriched = sessions.map((s) => {
+    const enriched = sessions
+      // Exclude sessions with no SessionState — these are failed/abandoned uploads
+      // that never started the pipeline. They'd show as "queued" forever otherwise.
+      .filter((s) => stateMap[s.mediaId])
+      .map((s) => {
       const state = stateMap[s.mediaId];
       let status = state?.status || null;
 
